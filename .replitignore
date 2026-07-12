@@ -3,3 +3,13 @@
 
 # No need to store the pnpm store twice.
 .local
+.migration-backup
+.git
+.github
+backend/artifacts
+backend/tests
+backend/**/__pycache__
+backend/**/*.pyc
+backend/.pytest_cache
+backend/control_tower.db
+frontend

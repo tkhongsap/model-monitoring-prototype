@@ -1,4 +1,4 @@
-# AI Monitoring & Evaluation Contract — v1.0
+# AI Monitoring & Evaluation Contract — v1.1
 
 **Classification: CPG Confidential — internal True Corporation use only.**
 
@@ -20,7 +20,7 @@ Obligations are staged: **[NOW]** = required of the prototype and any pilot inte
 
 ## 1. Purpose, scope and status
 
-v1.0 covers **binary-classification ML** use cases and **RAG-chat LLM** use cases; the
+v1.1 covers **binary-classification ML** use cases and **RAG-chat LLM** use cases; the
 **NBA/recommender lane is DRAFT** (§10). Regression, multiclass, and ranking are roadmap
 (§18). A use case that implements the REQUIRED tier of this contract gets, with zero
 monitor-side code changes: drift detection, label-free performance estimation, realized
@@ -42,7 +42,7 @@ the Window envelope (§5) is transport-symmetric by design.
 
 ## 3. Contract versioning and evolution
 
-- Every Window envelope carries `contract_version` (currently `"1.0"`). **[NOW]**
+- Every Window envelope carries `contract_version` (currently `"1.1"`). **[NOW]**
 - Additive optional fields do NOT increment the version; renamed/removed/retyped fields DO.
 - The normative schema artifact is `ai-use-cases/shared/telco_shared/telemetry.py`
   (pydantic v2). An OpenAPI 3.1 export is **[JULY]**.
@@ -64,7 +64,7 @@ service's traffic, drift, and retraining are real, not injected.
 
 ```json
 {
-  "contract_version": "1.0",
+  "contract_version": "1.1",
   "model_name": "telco-churn",
   "use_case_type": "ml",            // "ml" | "llm" | "nba"
   "latest_tick": 17,
@@ -80,19 +80,28 @@ Every telemetry pull returns:
 
 ```json
 {
-  "contract_version": "1.0",
+  "contract_version": "1.1",
   "window": "inferences",           // inferences|labels|reference|traces|recommendations|rewards
   "from_tick": 12, "to_tick": 12,   // v1 invariant: from_tick == to_tick == requested tick
   "count": 500,                     // == len(records)
   "available_at_tick": null,        // labels/rewards only: tick at which they become available
-  "window_start": null,             // optional ISO-8601 UTC; REQUIRED in v1.1
-  "window_end": null,
+  "window_id": "telco-churn:v1:t12:synthetic_demo",
+  "source_instance_id": "producer-01",
+  "opened_at": "2026-07-12T00:00:00Z",
+  "closed_at": "2026-07-12T00:05:00Z",
+  "content_sha256": "...",          // SHA-256 of the immutable canonical record content
+  "first_record_id": "inf-6001",
+  "last_record_id": "inf-6500",
+  "model_version": "1",
+  "provenance_counts": {"synthetic_demo": 500},
+  "batch_id": "poc-20260712T120000p0700-ab12cd34ef56", // optional scheduled-run correlation
   "records": [ ... ]
 }
 ```
 
 Content type `application/json; charset=utf-8`. `NaN`/`Infinity` are forbidden — emit
-`null`. `tick` omitted on the query string ⇒ the latest window.
+`null`. `tick` omitted on the query string ⇒ the latest window. A `window_id` is immutable:
+the producer must never return a different `content_sha256` for an already-observed id.
 
 ## 6. Time and windowing semantics
 
@@ -103,7 +112,7 @@ Content type `application/json; charset=utf-8`. `NaN`/`Infinity` are forbidden �
   it** — it never blind-increments past the service's clock, and it can replay/catch up
   after downtime because windows stay pullable. **[NOW]**
 - Retention guarantee: telemetry windows remain pullable for **≥ 72 h** across service
-  restarts. **[JULY]** (in-memory stores acceptable for the prototype).
+  restarts. **[NOW]** (producer and monitor cursors/observations are durable).
 - `404 unknown_tick` = the service never had (or evicted) that window — including
   negative ticks. `count=0` = the window exists and genuinely had zero traffic. These
   are different statements.
@@ -111,8 +120,16 @@ Content type `application/json; charset=utf-8`. `NaN`/`Infinity` are forbidden �
   are final once `latest_tick` has moved past them. The monitor reads only CLOSED
   windows (`tick < latest_tick`), and holds its cursor (retries rather than skips) when
   a window could not be observed at all.
-- `window_start`/`window_end` timestamps are optional in v1, **required in v1.1**, which
-  begins the migration to wall-clock range queries.
+- `opened_at`/`closed_at` timestamps are required in v1.1 and anchor source-to-monitor lag.
+- `batch_id` is optional and identifies the genuine execution batch that produced the
+  window. The monitor persists and displays it unchanged beside `window_id` and the
+  matching digest; it is never used to infer health.
+
+After inserting an observation durably, the monitor best-effort posts
+`POST /api/sync/observed` to the producer gateway with `window_id`, `observation_id`, and
+`content_sha256`. A failed acknowledgement is stored separately and never rolls back the
+observation. `GET /api/live/sync` exposes `source_tick`, `observed_tick`, `backlog`, state,
+last-success time, observation id, and matching digest.
 
 ## 7. ML lane
 
@@ -251,11 +268,12 @@ Drift & degradation, Feedback & action loop). Two refinements:
   enforcement is **[JULY]** — the prototype does not enforce it). `/telemetry/reference`
   is exempt: its size is bounded by the reference-window size the service declares.
   Range pulls (`from_tick`/`to_tick`) + `next_cursor` pagination and `sample_n` are
-  reserved for v1.1.
+  reserved for a future version.
 - **Judge cost model**: real judging is one LLM call per judged trace.
   Recommended policy: judge ≤ ~200 traces/window — 100 % of refusals and
-  low-heuristic-score traces, plus a small random baseline; a per-use-case budget
-  degrades to the heuristic when exhausted. Default judge tier: Haiku-class.
+  an approved sample plus a small random baseline. If the real judge or score write-back
+  fails, strict live mode records Unknown/error; it never substitutes heuristic scores.
+  Default judge tier: Haiku-class.
 - **The offline heuristic judge is an English-only dev stand-in.** Thai or mixed-language
   production traffic **requires the real Claude judge** (the token-overlap heuristic
   mis-scores Thai as hallucination). Every judged trace records its judge identity
@@ -304,20 +322,21 @@ both supported by design:
 2. **Amity use cases as producers**: any model Amity hosts implements the REQUIRED tier
    and registers like every other use case.
 
-## 17. Deployment topology and operations (production-July roadmap)
+## 17. Deployment topology and operations
 
 - Monitor control plane co-located with Amity in the on-prem landing zone; AWS/Azure
   placement is a config change (base URLs + secrets), not a code change.
-- **Dev-only today**: SQLite, local artifact files, in-memory stores.
-  **[JULY]**: Postgres (signals, rollups, read cursors), object storage (artifacts),
-  **self-hosted Langfuse** as the production trace store — the monitor's TraceStore seam
-  already mirrors the Langfuse SDK surface, so this is an adapter swap, not a rewrite.
-- The monitor itself gets metrics/structured logs/alerting **[JULY]** — today failures
-  degrade to Unknown but are only visible in the payload's `errors`.
+- Strict live mode requires managed Postgres for observations, signal history, source
+  cursors, and the renewable single-worker lease. SQLite remains test/developer-only.
+- Autoscale instances use a database lease with an in-flight heartbeat so only one worker
+  polls and expensive 15–60 second model/judge windows cannot outlive ownership.
+- `CONTROL_TOWER_MODE=live` makes baked scenario, simulation, export, and legacy artifact
+  APIs return 404. It also refuses readiness when Postgres, external producer URLs, shared
+  telemetry token, real Anthropic judge, or Langfuse credentials are missing.
 
 ## 18. Known limitations and roadmap
 
-Push-mode ingest · wall-clock windows (v1.1) · per-use-case thresholds UI ·
+Push-mode ingest · range/paginated pulls · per-use-case thresholds UI ·
 lag-replay version skew (a monitor catching up across a retrain grades old windows
 against the CURRENT model's CBPE/drift baselines; realized metrics use recorded
 probabilities and stay correct) ·

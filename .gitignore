@@ -48,8 +48,12 @@ Thumbs.db
 .cache/
 .local/
 .venv-backend/
+.venv-test/
 backend/.venv/
 backend/control_tower.db
+backend/.build-sha
+backend/artifacts/*
+!backend/artifacts/.gitkeep
 __pycache__/
 *.pyc
 

@@ -10,9 +10,22 @@ X-Categorical-Features headers, echoed in GET /telemetry/meta) — never hardcod
 """
 from __future__ import annotations
 
+import hashlib
 import io
+import json
 
 import httpx
+
+
+class TelemetryIntegrityError(RuntimeError):
+    """Producer metadata does not match the exact public records on the wire."""
+
+
+def canonical_records_sha256(records: list[dict]) -> str:
+    """Digest the exact decoded primary-record list using the v1.1 canonical JSON form."""
+    canonical = json.dumps(records, sort_keys=True, separators=(",", ":"),
+                           ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
 
 
 def _auth_headers() -> dict:
@@ -41,7 +54,7 @@ def pull(base_url: str, path: str, params: dict | None = None, timeout: float = 
     return r.json()
 
 
-def pull_meta(base_url: str, timeout: float = 10.0) -> dict:
+def pull_meta(base_url: str, timeout: float = 10.0, *, strict: bool = False) -> dict:
     """GET /telemetry/meta — {contract_version, model_name, use_case_type, latest_tick,
     feature_order, categorical_features, ...}. Best-effort: {} on any failure (callers
     use it for cursor sync / feature ownership, never as a hard dependency)."""
@@ -50,8 +63,73 @@ def pull_meta(base_url: str, timeout: float = 10.0) -> dict:
                       headers=_auth_headers())
         r.raise_for_status()
         return r.json()
-    except Exception:  # noqa: BLE001 — meta is advisory, never crash a tick over it
+    except Exception:  # noqa: BLE001 — callers choose advisory vs required semantics
+        if strict:
+            raise
         return {}
+
+
+def pull_build_version(base_url: str, timeout: float = 5.0) -> dict:
+    """Read the producer gateway's public build identity for deploy reconciliation."""
+    r = httpx.get(base_url.rstrip("/") + "/build/version", timeout=timeout,
+                  headers=_auth_headers())
+    r.raise_for_status()
+    return r.json()
+
+
+def window_metadata(envelope: dict, tick: int) -> dict:
+    """Extract the additive v1.1 immutable-window envelope.
+
+    v1.0 producers remain readable: stable fallback IDs/digests are derived from the
+    records without changing the existing endpoint wire shape.
+    """
+    records = envelope.get("records") or []
+    nested = envelope.get("window") if isinstance(envelope.get("window"), dict) else {}
+
+    def field(name: str, default=None):
+        return envelope.get(name, nested.get(name, default))
+
+    computed_digest = canonical_records_sha256(records)
+    advertised_digest = field("content_sha256")
+    if advertised_digest and str(advertised_digest) != computed_digest:
+        raise TelemetryIntegrityError(
+            f"window content digest mismatch: advertised {advertised_digest}, "
+            f"computed {computed_digest}")
+    digest = advertised_digest or computed_digest
+    advertised_count = envelope.get("count", len(records))
+    if int(advertised_count) != len(records):
+        raise TelemetryIntegrityError(
+            f"window record count mismatch: advertised {advertised_count}, "
+            f"received {len(records)}")
+
+    def record_id(record: dict) -> str | None:
+        for key in ("inference_id", "rec_id", "trace_id", "event_id", "record_id", "id"):
+            if record.get(key) is not None:
+                return str(record[key])
+        return None
+
+    first_id = field("first_record_id") or (record_id(records[0]) if records else None)
+    last_id = field("last_record_id") or (record_id(records[-1]) if records else None)
+    window_id = field("window_id") or f"legacy-t{tick}-{str(digest)[:16]}"
+    provenance = field("provenance_counts") or {}
+    if not provenance:
+        for record in records:
+            value = str(record.get("provenance") or record.get("data_provenance") or "unknown")
+            provenance[value] = provenance.get(value, 0) + 1
+    return {
+        "window_id": str(window_id),
+        "source_instance_id": field("source_instance_id"),
+        "opened_at": field("opened_at"),
+        "closed_at": field("closed_at"),
+        "content_sha256": str(digest),
+        "first_record_id": first_id,
+        "last_record_id": last_id,
+        "model_version": field("model_version"),
+        "provenance_counts": provenance,
+        "record_count": len(records),
+        "batch_id": field("batch_id") or (
+            records[0].get("batch_id") if records else None),
+    }
 
 
 def pull_model(base_url: str, path: str = "/model/artifact", timeout: float = 60.0):
@@ -90,6 +168,25 @@ def push_scores(base_url: str, scores: list[dict], timeout: float = 10.0) -> dic
     r = httpx.post(
         base_url.rstrip("/") + "/telemetry/scores",
         json={"scores": scores},
+        headers={**_auth_headers(), "Content-Type": "application/json"},
+        timeout=timeout,
+    )
+    r.raise_for_status()
+    payload = r.json()
+    accepted = payload.get("accepted")
+    if accepted is None or int(accepted) != len(scores):
+        raise RuntimeError(
+            f"score write-back accepted {accepted!r} of {len(scores)} submitted scores")
+    return payload
+
+
+def acknowledge_observation(base_url: str, *, window_id: str, observation_id: str,
+                            content_sha256: str, timeout: float = 10.0) -> dict:
+    """Best-effort durable monitor acknowledgement to the producer portfolio gateway."""
+    r = httpx.post(
+        base_url.rstrip("/") + "/api/sync/observed",
+        json={"window_id": window_id, "observation_id": observation_id,
+              "content_sha256": content_sha256},
         headers={**_auth_headers(), "Content-Type": "application/json"},
         timeout=timeout,
     )

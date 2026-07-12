@@ -1,28 +1,19 @@
 import { Switch, Route, Router as WouterRouter } from "wouter";
-import { SimProvider } from "@/lib/sim";
+import { lazy, Suspense } from "react";
 import { LiveProvider } from "@/lib/live";
-import { Masthead, NavTabs, Toasts } from "@/components/Chrome";
+import { LiveMasthead, LiveNavTabs } from "@/components/ChromeLive";
 import { PlayerBar } from "@/components/PlayerBar";
 import Home from "@/pages/home";
-import Portfolio from "@/pages/portfolio";
-import Pilot from "@/pages/pilot";
 import Heatmap from "@/pages/heatmap";
-import Gaps from "@/pages/gaps";
-import Actions from "@/pages/actions";
-import Board from "@/pages/board";
-import UseCase from "@/pages/use-case";
 import NotFound from "@/pages/not-found";
+
+const UseCase = lazy(() => import("@/pages/use-case"));
 
 function Router() {
   return (
     <Switch>
       <Route path="/" component={Home} />
-      <Route path="/portfolio" component={Portfolio} />
-      <Route path="/pilot" component={Pilot} />
       <Route path="/heatmap" component={Heatmap} />
-      <Route path="/gaps" component={Gaps} />
-      <Route path="/actions" component={Actions} />
-      <Route path="/board" component={Board} />
       <Route path="/use-case/:id" component={UseCase} />
       <Route component={NotFound} />
     </Switch>
@@ -33,17 +24,16 @@ function App() {
   return (
     <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, "")}>
       <div className="min-h-screen bg-slate-50 text-slate-900 antialiased">
-        <SimProvider>
-          <LiveProvider>
-            <Masthead />
-            <NavTabs />
-            <main className="mx-auto max-w-[1400px] px-4 pb-32 pt-5">
+        <LiveProvider>
+          <LiveMasthead />
+          <LiveNavTabs />
+          <main className="mx-auto max-w-[1400px] px-4 pb-32 pt-5">
+            <Suspense fallback={<div className="rounded-lg border border-slate-200 bg-white p-8 text-sm text-slate-500">Loading observation detail…</div>}>
               <Router />
-            </main>
-            <Toasts />
-            <PlayerBar />
-          </LiveProvider>
-        </SimProvider>
+            </Suspense>
+          </main>
+          <PlayerBar />
+        </LiveProvider>
       </div>
     </WouterRouter>
   );

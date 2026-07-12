@@ -14,8 +14,10 @@ Each model implements the same small **telemetry contract** (`docs/MONITORING-CO
 reaches OUT to their `/telemetry/*` endpoints, runs the shared health engine, and grades every lane
 Green / Amber / Red. **Onboarding a 4th model = one seed row + one URL** (see "Plug in a new model" below).
 
-The baked 130-row simulated portfolio still exists (deterministic golden-bake demo) but is no longer on the
-dashboard nav — the dashboard is now live-first.
+The baked 130-row scenario exists only for the separate developer command. A strict-live
+deployment does not register baked routes, does not build demo artifacts, and serves only
+persisted producer observations. Telecom inputs are synthetic-safe and labelled by provenance;
+they are not claimed to be customer production data.
 
 ---
 
@@ -66,18 +68,18 @@ Open **http://localhost:5000**.
 
 The monitor observes **closed** telemetry windows, so the model apps need real traffic first. Two ways:
 
-- **Traffic driver** (drives real inference + advances the apps' clocks + ramps the drift knob):
+- **Developer traffic driver** (local-only; drives real inference over labelled synthetic-safe input):
   ```powershell
   python "$uc\tools\traffic.py" --churn http://127.0.0.1:8083 --chatbot http://127.0.0.1:8082 --nba http://127.0.0.1:8084
   ```
-- **Or** just click **"Observe next window"** on the dashboard PlayerBar (or toggle **Auto-observe**) — each
-  click advances all three models one window and re-grades. The first tick is ~25 s (baselines + judge warm-up);
-  subsequent ticks ~15 s.
+- **Production:** use the producer dashboard's authenticated, explicit **Run demo window** action.
+  The control tower is read-only; its lease worker observes closed producer windows. There is
+  no hidden background traffic generator and no browser-driven monitor cursor.
 
 Watch the **Heatmap** and **At A Glance** pages turn Green → Amber → Red as drift ramps, then recover after a
 retrain. The chatbot's judged traces appear in your Langfuse project in real time.
 
-## 4. Deploy online (two Replit Reserved VMs)
+## 4. Deploy online (producer Reserved VM + monitor Autoscale)
 
 Everything above also runs on the web — **two deployments, joined only by URLs** (the
 same shape as production: the monitor is one service; the models live elsewhere).
@@ -96,23 +98,27 @@ hosting convenience only.
 4. Note the URL, e.g. `https://telco-models.<user>.replit.app` — check `/health`
    (aggregates all four services).
 
-### 4b. Monitor VM (`model-monitoring-prototype` repo)
-`.replit` is pre-configured for **Reserved VM** — *not* autoscale, because the live
-plane keeps in-process state (read cursors + signal history) and needs exactly one
-always-on instance. The deploy build (`scripts/deploy-build.sh`) builds the dashboard
-and FastAPI serves it, so the deployment is one service: dashboard + `/api` on one URL.
+### 4b. Autoscale monitor (`model-monitoring-prototype` repo)
+`.replit` is pre-configured for **Autoscale**. Monitor state and artifact bytes live in
+a monitor-owned managed PostgreSQL database. A renewable database lease prevents duplicate
+observations across instances; `.github/workflows/autoscale-poll.yml` wakes a scaled-to-zero
+deployment every five minutes and waits for one authenticated poll cycle.
 
-1. Deploy → **Reserved VM**.
+1. Add a separate managed PostgreSQL database, then deploy → **Autoscale**.
 2. Secrets:
    - `LIVE_CHURN_URL   = https://telco-models.<user>.replit.app/churn`
    - `LIVE_CHATBOT_URL = https://telco-models.<user>.replit.app/chatbot`
    - `LIVE_NBA_URL     = https://telco-models.<user>.replit.app/nba`
    - `LIVE_TELEMETRY_TOKEN` = the same shared secret as 4a
+   - `LIVE_PRODUCER_URL` = the producer gateway URL
+   - `LIVE_WORKER_TOKEN` = a separate strong secret
    - `ANTHROPIC_API_KEY` (real judge), `LLM_JUDGE_MODEL=claude-haiku-4-5`,
      `LLM_JUDGE_MAX_TRACES=20`
    - `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` / `LANGFUSE_HOST` (trace push)
-3. Open the monitor URL → the live dashboard. Drive traffic with `tools/traffic.py`
-   pointed at the models URL prefixes, or click **Observe next window**.
+3. Set GitHub Actions secret `MONITOR_WORKER_TOKEN` to the same value as
+   `LIVE_WORKER_TOKEN`; optionally set repository variable `MONITOR_URL`. Open the monitor
+   URL for a public, redacted, read-only dashboard. Generate production demo traffic only
+   from the producer's authenticated controls.
 
 **Deferred (enterprise)**: when models sit on-prem behind firewalls, the pull model
 needs either network reach or the push-ingest roadmap item — a Council/architecture

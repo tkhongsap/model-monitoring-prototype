@@ -26,7 +26,7 @@ import numpy as np
 
 from ... import config
 from ..base import LaneResult, TickContext
-from ..telemetry_http import pull
+from ..telemetry_http import pull, window_metadata
 from .stores import LangfuseCloudStore, SqliteTraceStore
 
 _TOKEN = re.compile(r"[a-z0-9]+")
@@ -45,6 +45,7 @@ _HALLUCINATION_BAR = 0.5  # non-refusal below this groundedness counts as a hall
 # "which" that a factual answer never echoes), so on-topic responses floor here — matching
 # the seeded judge, where relevance stays high and degradation shows in groundedness.
 _ONTOPIC_RELEVANCE = 0.9
+MIN_LIVE_TRACES = 8
 
 
 def _content(text: str) -> set[str]:
@@ -77,7 +78,7 @@ def _judge_offline(trace: dict) -> dict:
             "hallucination": halluc, "pii": bool(_PII.search(answer))}
 
 
-def _judge_claude(traces: list[dict], model: str) -> list[dict]:
+def _judge_claude(traces: list[dict], model: str, *, allow_fallback: bool = True) -> list[dict]:
     """Real LLM-as-judge: one structured `messages.parse` call per trace, run CONCURRENTLY
     (each call is independent) so a window is judged in ~ceil(n/workers) round-trips rather
     than n sequential ones — the difference between a snappy and a minute-long live tick."""
@@ -119,8 +120,10 @@ def _judge_claude(traces: list[dict], model: str) -> list[dict]:
                 output_format=Score).parsed_output
             return {"groundedness": float(s.groundedness), "relevance": float(s.relevance),
                     "hallucination": bool(s.hallucination), "pii": bool(s.pii)}
-        except Exception:  # noqa: BLE001 — degrade this one trace to the heuristic
-            return _judge_offline(tr)
+        except Exception:  # noqa: BLE001 — strict-live rejects silent heuristic scores
+            if allow_fallback:
+                return _judge_offline(tr)
+            raise
 
     with ThreadPoolExecutor(max_workers=min(8, len(traces) or 1)) as ex:
         return list(ex.map(judge_one, traces))   # map preserves trace order
@@ -166,12 +169,22 @@ class LiveHttpLLMAdapter:
         # "window unobserved — hold the cursor and retry" (errors['telemetry']) from a
         # judging/persistence failure (review finding)
         try:
-            traces = pull(self.base_url, "/telemetry/traces", {"tick": tick.tick})["records"]
+            trace_env = pull(self.base_url, "/telemetry/traces", {"tick": tick.tick})
+            traces = trace_env["records"]
+            res.metadata.update(window_metadata(trace_env, tick.tick))
         except Exception as e:  # noqa: BLE001
             for k in ("hallucination_rate", "groundedness", "relevance",
                       "pii_exposure_rate", "p95_latency_s"):
                 res.signals[k] = None
             res.errors["telemetry"] = f"{type(e).__name__}: {e}"
+            return res
+        if len(traces) < MIN_LIVE_TRACES:
+            for key in ("hallucination_rate", "groundedness", "relevance",
+                        "pii_exposure_rate", "p95_latency_s"):
+                res.signals[key] = None
+            res.records = []
+            res.errors["insufficient_sample"] = (
+                f"requires {MIN_LIVE_TRACES} traces; observed {len(traces)}")
             return res
         try:
             if config.ANTHROPIC_API_KEY:
@@ -182,9 +195,13 @@ class LiveHttpLLMAdapter:
                 if cap and len(traces) > cap:
                     stride = len(traces) / cap
                     traces = [traces[int(i * stride)] for i in range(cap)]
-                scores = _judge_claude(traces, self.judge_model)
+                scores = _judge_claude(
+                    traces, self.judge_model, allow_fallback=not config.strict_live_mode())
             else:
-                judge = "heuristic-v1"           # instant — judges the whole window
+                if config.strict_live_mode():
+                    raise RuntimeError(
+                        "real Anthropic judge is required when CONTROL_TOWER_MODE=live")
+                judge = "heuristic-v1"           # developer/demo mode only
                 scores = [_judge_offline(t) for t in traces]
 
             latencies = [float(t.get("latency_s", 0.0)) for t in traces]
@@ -227,15 +244,23 @@ class LiveHttpLLMAdapter:
                     push_scores(self.base_url, score_items)
             except Exception as e:  # noqa: BLE001 — write-back failure must not kill the tick
                 res.errors["score_writeback"] = f"{type(e).__name__}: {e}"
+                if config.strict_live_mode():
+                    # A live score that was not durably written back is not presented as
+                    # a successful Green evaluation.  Keep the observation for audit, but
+                    # make every judged metric explicitly Unknown/error.
+                    for key in ("hallucination_rate", "groundedness", "relevance",
+                                "pii_exposure_rate", "p95_latency_s"):
+                        res.signals[key] = None
 
-            # one sample per distinct question for the Judge-scores drill-down tab
+            # Public live APIs expose score evidence, never raw questions/answers.  A
+            # stable trace identifier supports audit correlation without leaking input.
             seen, sample = set(), []
             for tr, sc in zip(traces, scores):
-                q = tr.get("question", "")
-                if q not in seen:
-                    seen.add(q)
+                trace_id = str(tr.get("trace_id") or "")
+                if trace_id not in seen:
+                    seen.add(trace_id)
                     sample.append({
-                        "question": q, "answer": tr.get("answer", "")[:80],
+                        "trace_id": trace_id,
                         "groundedness": round(sc["groundedness"], 3),
                         "relevance": round(sc["relevance"], 3),
                         "hallucination": sc["hallucination"], "pii": sc["pii"],

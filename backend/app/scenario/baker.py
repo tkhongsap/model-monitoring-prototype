@@ -31,12 +31,12 @@ def _artifact_writer_factory(scenario_id: str):
         artifact_id = uuid.uuid5(uuid.NAMESPACE_URL, f"{scenario_id}/{tick}/{kind}").hex
         filename = f"{scenario_id.lower()}-t{tick:02d}-{kind}.{ext}"
         path = config.ARTIFACTS_DIR / filename
-        if isinstance(content, bytes):
-            path.write_bytes(content)
-        else:
-            path.write_text(content, encoding="utf-8")
+        payload = content if isinstance(content, bytes) else content.encode("utf-8")
+        path.write_bytes(payload)
         ctype = "text/html" if ext == "html" else "image/png"
         db.put_artifact(artifact_id, scenario_id, tick, kind, filename, ctype)
+        if scenario_id.startswith("LIVE-"):
+            db.put_live_artifact_blob(artifact_id, ctype, payload)
         return artifact_id
 
     return write

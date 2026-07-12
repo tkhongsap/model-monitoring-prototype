@@ -22,8 +22,8 @@ if [ ! -x "$PY" ]; then
   echo "[run] ERROR: .venv-backend missing — run backend/build.sh first" >&2
   exit 1
 fi
-# Deterministic boot: reset player to baked tick 0 if a baked DB exists (R-34).
-if [ -f backend/control_tower.db ]; then
+# Deterministic demo boot only.  Strict live never reads or mutates baked player state.
+if [ "${CONTROL_TOWER_MODE:-demo}" != "live" ] && [ -f backend/control_tower.db ]; then
   (cd backend && "../$PY" -c "from app import db, config; db.put_state(scenario_id=config.DEFAULT_SCENARIO, tick=0, playing=0, speed=1, mode='baked', seed=config.DEMO_SEED)") || true
 fi
 cd backend

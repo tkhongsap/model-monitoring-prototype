@@ -12,55 +12,145 @@ thread (never the event loop).
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import threading
 
-from .. import config
-from ..adapters.base import TickContext
+from .. import config, db
+from ..adapters.base import ExplainResult, TickContext
 from ..adapters.explain.lime_shap import make_explain
 from ..adapters.explain.live_http import LiveHttpExplainAdapter
 from ..adapters.llm_eval.judge import make_llm_eval
 from ..adapters.ml_monitor.evidently_nannyml import make_ml_monitor
 from ..adapters.ml_monitor.nba_live_http import LiveHttpNBAAdapter
-from ..adapters.telemetry_http import pull_meta
+from ..adapters.telemetry_http import acknowledge_observation, pull_meta
 from ..engines import health
+from ..live_sync import source_sync
 from .baker import _artifact_writer_factory
 
 LIVE_UC = "AICT-L01"      # the live churn use case (ML lane)
 LIVE_LLM_UC = "AICT-L02"  # the live chatbot use case (LLM lane)
 LIVE_NBA_UC = "AICT-L03"  # the live NBA recommender use case (ML + feedback lanes)
 
-# non-ML lanes hand-set for an ML use case (mirrors the baker's P02 rollup, §A.1.4)
-_HAND_SET = {"Feedback & action loop": "Unknown", "Safety & security": "Green", "Reliability": "Green"}
-_EXCLUDED_LANES = {"Feedback & action loop"}
+# Unmeasured lanes are explicitly Unknown — never optimistic Green.  They are excluded
+# from the measured overall rollup, but stay visible with an auditable reason.
+_NOT_INSTRUMENTED = "Unknown — not instrumented"
+_HAND_SET = {"Feedback & action loop": "Unknown", "Safety & security": "Unknown",
+             "Reliability": "Unknown"}
+_EXCLUDED_LANES = set(_HAND_SET)
 
 # lanes an LLM use case doesn't produce signals for (its Quality/Safety/Reliability lanes
 # come from the 5 LLM signals); Drift is assumed clean, Feedback is declared-Unknown.
-_HAND_SET_LLM = {"Drift & degradation": "Green", "Feedback & action loop": "Unknown"}
-_EXCLUDED_LANES_LLM = {"Feedback & action loop"}
+_HAND_SET_LLM = {"Drift & degradation": "Unknown", "Feedback & action loop": "Unknown"}
+_EXCLUDED_LANES_LLM = set(_HAND_SET_LLM)
 
 # NBA hand-sets only Safety/Reliability — Feedback is a REAL lane (acceptance_rate);
 # while rewards lag it is reasoned-Unknown and excluded, once arrived it COUNTS.
-_HAND_SET_NBA = {"Safety & security": "Green", "Reliability": "Green"}
+_HAND_SET_NBA = {"Safety & security": "Unknown", "Reliability": "Unknown"}
 
 
-def _commit_tick(runner, payload: dict, telemetry_err: str | None) -> dict:
-    """Store a graded tick. On a telemetry failure (the model app is unreachable) HOLD the
-    last good state (annotated stale) instead of clobbering it with an all-Unknown payload,
-    and do NOT advance the read cursor — the dashboard keeps showing the last observed
-    window rather than flashing every lane grey. On success, store and advance."""
+def _source_lag_ms(closed_at: str | None) -> float | None:
+    if not closed_at:
+        return None
+    try:
+        dt = datetime.fromisoformat(closed_at.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return max(0.0, (datetime.now(timezone.utc) - dt).total_seconds() * 1000)
+    except (TypeError, ValueError):
+        return None
+
+
+def _window_fields(result, tick: int) -> dict:
+    meta = dict(getattr(result, "metadata", {}) or {})
+    if meta.get("model_version") is None:
+        meta.pop("model_version", None)  # do not erase adapter-derived legacy metadata
+    meta.setdefault("window_id", f"legacy-{tick}")
+    meta.setdefault("content_sha256", "")
+    meta["record_count"] = int(meta.get("record_count") or 0)
+    meta["source_lag_ms"] = _source_lag_ms(meta.get("closed_at"))
+    return meta
+
+
+def _commit_tick(runner, payload: dict, telemetry_err: str | None, meta: dict) -> dict:
+    """Durably store a graded tick before advancing the shared source cursor."""
     if telemetry_err:
-        if runner._current is not None:
-            held = dict(runner._current)
-            held["cursor_held"] = True
-            held["errors"] = {**held.get("errors", {}), "telemetry": telemetry_err}
-            runner._current = held
-            return held
-        payload["cursor_held"] = True   # never observed yet — surface the degraded payload
-        runner._current = payload
-        return payload
+        db.mark_live_error(runner.use_case_id, telemetry_err)
+        held = runner.state() or payload
+        held = dict(held)
+        held["cursor_held"] = True
+        held["sync_state"] = "error"
+        held["state"] = "error"
+        held["errors"] = {**held.get("errors", {}), "telemetry": telemetry_err}
+        runner._current = held
+        return held
+
+    latest_tick = meta.get("latest_tick")
+    source_tick = (int(latest_tick) - 1) if latest_tick is not None else runner._read_tick
+    next_tick = runner._read_tick + 1
+    backlog = max(0, int(latest_tick) - next_tick) if latest_tick is not None else 0
+    state = "catching_up" if backlog else "at_tail"
+    payload.update({
+        "source_tick": source_tick,
+        "producer_tick": source_tick,
+        "observed_tick": runner._read_tick,
+        "backlog": backlog,
+        "sync_state": state,
+        "state": state,
+    })
+    try:
+        observation_id, _ = db.put_live_observation(
+            runner.use_case_id, payload, source_tick=source_tick,
+            next_tick=next_tick, backlog=backlog, state=state)
+    except db.WindowDigestMismatch as exc:
+        return _commit_tick(runner, payload, str(exc), meta)
+
+    runner._read_tick = next_tick
+    payload["observation_id"] = observation_id
+    payload["window_digest"] = payload.get("content_sha256")
     runner._current = payload
-    runner._read_tick += 1
+
+    # Acknowledgement is deliberately after the durable local commit.  Its failure is
+    # persisted separately and never rolls back or loses the observation.
+    if config.LIVE_PRODUCER_URL:
+        try:
+            acknowledge_observation(
+                config.LIVE_PRODUCER_URL,
+                window_id=payload["window_id"], observation_id=observation_id,
+                content_sha256=payload["content_sha256"])
+            db.set_live_ack(observation_id, ok=True)
+            payload["ack_status"] = "acknowledged"
+        except Exception as exc:  # noqa: BLE001
+            error = f"{type(exc).__name__}: {exc}"
+            db.set_live_ack(observation_id, ok=False, error=error)
+            payload["ack_status"] = "error"
+            payload["ack_error"] = error
+    else:
+        payload["ack_status"] = "not_configured"
     return payload
+
+
+def retry_pending_acknowledgements(limit: int = 100) -> dict:
+    """Retry durable producer acknowledgements independently of cursor advancement."""
+    if not config.LIVE_PRODUCER_URL:
+        return {"attempted": 0, "acknowledged": 0, "failed": 0}
+    rows = db.list_live_acks_to_retry(limit)
+    acknowledged = 0
+    for row in rows:
+        try:
+            acknowledge_observation(
+                config.LIVE_PRODUCER_URL,
+                window_id=row["window_id"],
+                observation_id=row["observation_id"],
+                content_sha256=row["content_sha256"],
+            )
+            db.set_live_ack(row["observation_id"], ok=True)
+            acknowledged += 1
+        except Exception as exc:  # noqa: BLE001 — retained for the next lease cycle
+            db.set_live_ack(
+                row["observation_id"], ok=False,
+                error=f"{type(exc).__name__}: {exc}")
+    return {"attempted": len(rows), "acknowledged": acknowledged,
+            "failed": len(rows) - acknowledged}
 
 
 def _signal_view(sig: dict, s_health: dict, extra: dict | None = None) -> dict:
@@ -78,20 +168,37 @@ def _signal_view(sig: dict, s_health: dict, extra: dict | None = None) -> dict:
     return out
 
 
-def _ahead_of_app(base_url: str, read_tick: int, uc: str) -> dict | None:
+def _ahead_of_app(base_url: str, read_tick: int, uc: str) -> tuple[dict | None, dict]:
     """Cursor sync: best-effort /telemetry/meta; the monitor reads only CLOSED windows
     (tick < latest_tick — the latest window is still open: /chat appends to it, contract
     §6). If the cursor has caught up, return a waiting payload (caller must NOT advance
     the cursor)."""
-    latest = pull_meta(base_url).get("latest_tick")
-    if latest is not None and read_tick >= latest:
-        return {"use_case_id": uc, "tick": None, "mode": "live",
-                "waiting": True, "latest_app_tick": latest}
-    return None
+    try:
+        meta = pull_meta(base_url, strict=True)
+        if meta.get("latest_tick") is None:
+            raise ValueError("/telemetry/meta omitted latest_tick")
+        latest = int(meta["latest_tick"])
+    except Exception as exc:  # noqa: BLE001
+        error = f"{type(exc).__name__}: {exc}"
+        db.mark_live_error(uc, error)
+        return ({"use_case_id": uc, "tick": None, "mode": "live",
+                 "waiting": True, "cursor_held": True, "sync_state": "error",
+                 "state": "error", "errors": {"telemetry": error}}, {})
+
+    source_tick = latest - 1
+    backlog = max(0, latest - read_tick)
+    contact_state = "catching_up" if backlog else "at_tail"
+    db.mark_live_contact(uc, source_tick, backlog, contact_state)
+    if read_tick >= latest:
+        sync = source_sync(uc)
+        return ({"use_case_id": uc, "tick": None, "mode": "live",
+                 "waiting": True, "latest_app_tick": latest, **sync}, meta)
+    return None, meta
 
 
 class LiveRunner:
     def __init__(self, churn_url: str | None = None, seed: int | None = None) -> None:
+        self.use_case_id = LIVE_UC
         self.seed = seed if seed is not None else config.DEMO_SEED
         self.base_url = (churn_url or config.LIVE_CHURN_URL).rstrip("/")
         # per-use-case artifact namespace: L01 and L03 write the same artifact KINDS at
@@ -101,8 +208,10 @@ class LiveRunner:
         cfg = {"base_url": self.base_url, "chunk_size": 500, "model_name": "telco-churn"}
         self.ml = make_ml_monitor(self.seed, cfg, writer, impl="live_http")
         self.explain = make_explain(self.seed, cfg, writer, impl="live_http")
-        self._read_tick = 0
-        self._current: dict | None = None
+        cursor = db.get_live_source(self.use_case_id)
+        self._read_tick = int(cursor["next_tick"])
+        latest = db.get_latest_live_observation(self.use_case_id)
+        self._current: dict | None = latest["payload"] if latest else None
         self._lock = threading.Lock()
 
     def _grade(self, ml_res, ex_res, t: int) -> dict:
@@ -120,6 +229,7 @@ class LiveRunner:
         return {
             "use_case_id": LIVE_UC, "tick": t, "mode": "live",
             "signals": _signal_view(sig, s_health, extra), "lanes": lanes, "overall": overall,
+            "lane_reasons": {lane: _NOT_INSTRUMENTED for lane in _HAND_SET},
             "drifted_features": records.get("drifted_features", []),
             "reference_auc": records.get("reference_auc"),
             "model_version": records.get("model_version"),
@@ -128,23 +238,35 @@ class LiveRunner:
             "lime_top": ex_res.lime_top, "lime_instance": ex_res.instance,
             "artifacts": {**ml_res.artifacts, **ex_res.artifacts},
             "errors": {**ml_res.errors, **ex_res.errors},
+            **_window_fields(ml_res, t),
         }
 
     def tick(self) -> dict:
         """Observe the next telemetry window, grade it, store + return the payload."""
         with self._lock:
+            self._read_tick = int(db.get_live_source(self.use_case_id)["next_tick"])
             t = self._read_tick
-            waiting = _ahead_of_app(self.base_url, t, LIVE_UC)
+            waiting, meta = _ahead_of_app(self.base_url, t, LIVE_UC)
             if waiting:
                 return waiting  # don't advance, don't store as _current
             ctx = TickContext(tick=t, seed=self.seed, scenario_id="LIVE")
             ml_res = self.ml.monitor(LIVE_UC, ctx)
-            ex_res = self.explain.explain(LIVE_UC, ctx)
+            ex_res = (ExplainResult() if "insufficient_sample" in ml_res.errors
+                      else self.explain.explain(LIVE_UC, ctx))
             payload = self._grade(ml_res, ex_res, t)
-            return _commit_tick(self, payload, ml_res.errors.get("telemetry"))
+            return _commit_tick(self, payload, ml_res.errors.get("telemetry"), meta)
 
     def state(self) -> dict | None:
-        return self._current
+        latest = db.get_latest_live_observation(self.use_case_id)
+        current = dict(latest["payload"]) if latest else (dict(self._current) if self._current else None)
+        if current is None:
+            return None
+        sync = source_sync(self.use_case_id)
+        current.update(sync)
+        if sync.get("last_error"):
+            current["errors"] = {**current.get("errors", {}),
+                                 "telemetry": sync["last_error"]}
+        return current
 
 
 class LiveLLMRunner:
@@ -153,12 +275,15 @@ class LiveLLMRunner:
     and untouched). tick() does sync HTTP + judging, so callers run it in a worker thread."""
 
     def __init__(self, chatbot_url: str | None = None, seed: int | None = None) -> None:
+        self.use_case_id = LIVE_LLM_UC
         self.seed = seed if seed is not None else config.DEMO_SEED
         self.base_url = (chatbot_url or config.LIVE_CHATBOT_URL).rstrip("/")
         cfg = {"base_url": self.base_url, "judge_model": config.LLM_JUDGE_MODEL}
         self.llm = make_llm_eval(self.seed, "LIVE", LIVE_LLM_UC, cfg=cfg, impl="live_http")
-        self._read_tick = 0
-        self._current: dict | None = None
+        cursor = db.get_live_source(self.use_case_id)
+        self._read_tick = int(cursor["next_tick"])
+        latest = db.get_latest_live_observation(self.use_case_id)
+        self._current: dict | None = latest["payload"] if latest else None
         self._lock = threading.Lock()
 
     def _grade(self, res, t: int) -> dict:
@@ -169,24 +294,37 @@ class LiveLLMRunner:
         return {
             "use_case_id": LIVE_LLM_UC, "tick": t, "mode": "live",
             "signals": _signal_view(sig, s_health), "lanes": lanes, "overall": overall,
-            "judge": config.LLM_JUDGE_MODEL if config.ANTHROPIC_API_KEY else "heuristic-v1",
+            "lane_reasons": {lane: _NOT_INSTRUMENTED for lane in _HAND_SET_LLM},
+            "judge": (config.LLM_JUDGE_MODEL if config.ANTHROPIC_API_KEY
+                      else ("required-unavailable" if config.strict_live_mode() else "heuristic-v1")),
             "judge_sample": res.records if isinstance(res.records, list) else [],
             "errors": res.errors,
+            **_window_fields(res, t),
         }
 
     def tick(self) -> dict:
         with self._lock:
+            self._read_tick = int(db.get_live_source(self.use_case_id)["next_tick"])
             t = self._read_tick
-            waiting = _ahead_of_app(self.base_url, t, LIVE_LLM_UC)
+            waiting, meta = _ahead_of_app(self.base_url, t, LIVE_LLM_UC)
             if waiting:
                 return waiting
             ctx = TickContext(tick=t, seed=self.seed, scenario_id="LIVE")
             res = self.llm.evaluate(LIVE_LLM_UC, ctx)
             payload = self._grade(res, t)
-            return _commit_tick(self, payload, res.errors.get("telemetry"))
+            return _commit_tick(self, payload, res.errors.get("telemetry"), meta)
 
     def state(self) -> dict | None:
-        return self._current
+        latest = db.get_latest_live_observation(self.use_case_id)
+        current = dict(latest["payload"]) if latest else (dict(self._current) if self._current else None)
+        if current is None:
+            return None
+        sync = source_sync(self.use_case_id)
+        current.update(sync)
+        if sync.get("last_error"):
+            current["errors"] = {**current.get("errors", {}),
+                                 "telemetry": sync["last_error"]}
+        return current
 
 
 class LiveNBARunner:
@@ -199,6 +337,7 @@ class LiveNBARunner:
     they lag."""
 
     def __init__(self, nba_url: str | None = None, seed: int | None = None) -> None:
+        self.use_case_id = LIVE_NBA_UC
         self.seed = seed if seed is not None else config.DEMO_SEED
         self.base_url = (nba_url or config.LIVE_NBA_URL).rstrip("/")
         writer = _artifact_writer_factory(f"LIVE-{LIVE_NBA_UC}")   # see LiveRunner note
@@ -207,8 +346,10 @@ class LiveNBARunner:
             base_url=self.base_url, artifact_writer=writer, model_name="nba-recommender",
             seed=self.seed, class_names=["decline", "accept"],
             inferences_path="/telemetry/recommendations")
-        self._read_tick = 0
-        self._current: dict | None = None
+        cursor = db.get_live_source(self.use_case_id)
+        self._read_tick = int(cursor["next_tick"])
+        latest = db.get_latest_live_observation(self.use_case_id)
+        self._current: dict | None = latest["payload"] if latest else None
         self._lock = threading.Lock()
 
     def _grade(self, ml_res, ex_res, t: int) -> dict:
@@ -218,7 +359,7 @@ class LiveNBARunner:
         pending = records.get("realized_pending_reason")
         acc_pending = ml_res.errors.get("acceptance_pending")
         excluded: set[str] = set()
-        excluded_lanes: set[str] = set()
+        excluded_lanes: set[str] = set(_HAND_SET_NBA)
         hand_set = dict(_HAND_SET_NBA)
         extra: dict = {}
         if pending:  # reasoned-Unknown, excluded from rollup (labels lag by design)
@@ -242,6 +383,7 @@ class LiveNBARunner:
         return {
             "use_case_id": LIVE_NBA_UC, "tick": t, "mode": "live",
             "signals": _signal_view(sig, s_health, extra), "lanes": lanes, "overall": overall,
+            "lane_reasons": {lane: _NOT_INSTRUMENTED for lane in _HAND_SET_NBA},
             "drifted_features": records.get("drifted_features", []),
             "reference_auc": records.get("reference_auc"),
             "model_version": records.get("model_version"),
@@ -253,22 +395,34 @@ class LiveNBARunner:
             "lime_top": ex_res.lime_top, "lime_instance": ex_res.instance,
             "artifacts": {**ml_res.artifacts, **ex_res.artifacts},
             "errors": {**ml_res.errors, **ex_res.errors},
+            **_window_fields(ml_res, t),
         }
 
     def tick(self) -> dict:
         with self._lock:
+            self._read_tick = int(db.get_live_source(self.use_case_id)["next_tick"])
             t = self._read_tick
-            waiting = _ahead_of_app(self.base_url, t, LIVE_NBA_UC)
+            waiting, meta = _ahead_of_app(self.base_url, t, LIVE_NBA_UC)
             if waiting:
                 return waiting
             ctx = TickContext(tick=t, seed=self.seed, scenario_id="LIVE")
             ml_res = self.ml.monitor(LIVE_NBA_UC, ctx)
-            ex_res = self.explain.explain(LIVE_NBA_UC, ctx)
+            ex_res = (ExplainResult() if "insufficient_sample" in ml_res.errors
+                      else self.explain.explain(LIVE_NBA_UC, ctx))
             payload = self._grade(ml_res, ex_res, t)
-            return _commit_tick(self, payload, ml_res.errors.get("telemetry"))
+            return _commit_tick(self, payload, ml_res.errors.get("telemetry"), meta)
 
     def state(self) -> dict | None:
-        return self._current
+        latest = db.get_latest_live_observation(self.use_case_id)
+        current = dict(latest["payload"]) if latest else (dict(self._current) if self._current else None)
+        if current is None:
+            return None
+        sync = source_sync(self.use_case_id)
+        current.update(sync)
+        if sync.get("last_error"):
+            current["errors"] = {**current.get("errors", {}),
+                                 "telemetry": sync["last_error"]}
+        return current
 
 
 _ml_runner: LiveRunner | None = None

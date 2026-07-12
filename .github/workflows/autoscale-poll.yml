@@ -1,0 +1,29 @@
+name: Wake Autoscale live poller
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: autoscale-live-poll
+  cancel-in-progress: false
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Run one authenticated lease-protected poll cycle
+        env:
+          MONITOR_URL: ${{ vars.MONITOR_URL || 'https://model-monitoring-prototype.replit.app' }}
+          MONITOR_WORKER_TOKEN: ${{ secrets.MONITOR_WORKER_TOKEN }}
+        run: |
+          test -n "$MONITOR_WORKER_TOKEN"
+          curl --fail-with-body --silent --show-error \
+            --retry 2 --retry-all-errors --max-time 540 \
+            -X POST "$MONITOR_URL/api/live/poll" \
+            -H "Authorization: Bearer $MONITOR_WORKER_TOKEN" \
+            -H "Accept: application/json"

@@ -10,7 +10,7 @@ import json
 
 import anyio
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
@@ -467,6 +467,7 @@ async def events(request: Request):
 # model apps, runs its engines, and grades a LIVE use case. The baked demo is untouched.
 
 from ..scenario.live_runner import live_runner, reset_live_runner  # noqa: E402
+from ..live_sync import portfolio_sync, source_sync  # noqa: E402
 
 from . import live_portfolio  # noqa: E402
 
@@ -484,11 +485,13 @@ async def live_tick(uc: str = "AICT-L01"):
 def live_state(uc: str = "AICT-L01"):
     p = live_runner(uc).state()
     return p or {"use_case_id": uc, "mode": "live", "tick": None,
-                 "message": f"no live tick yet — POST /api/live/tick?uc={uc}"}
+                 "message": "waiting for the backend poller to observe a closed window",
+                 **source_sync(uc)}
 
 
 @router.post("/live/reset")
 def live_reset(uc: str | None = None):
+    db.clear_live_state(uc)
     reset_live_runner(uc)
     return {"reset": True, "uc": uc or "all"}
 
@@ -506,6 +509,46 @@ def live_use_case(uc: str):
     if d is None:
         raise HTTPException(404, detail=f"unknown live use case {uc}")
     return d
+
+
+@router.get("/live/sync")
+def live_sync_all():
+    """Durable producer-to-monitor cursor state for every live use case."""
+    return portfolio_sync(live_portfolio.LIVE_UCS)
+
+
+@router.get("/live/sync/{uc}")
+def live_sync_one(uc: str):
+    if uc not in live_portfolio.LIVE_UCS:
+        raise HTTPException(404, detail=f"unknown live use case {uc}")
+    return source_sync(uc)
+
+
+@router.get("/live/observations")
+def live_observations(uc: str | None = None, limit: int = 100):
+    if uc is not None and uc not in live_portfolio.LIVE_UCS:
+        raise HTTPException(404, detail=f"unknown live use case {uc}")
+    from .live_routes import _public_payload
+    rows = db.list_live_observations(uc, limit)
+    for row in rows:
+        row["payload"] = _public_payload(row.get("payload") or {})
+    # The live namespace never reads baked ticks or scenario snapshots.
+    return {"contract_version": "1.1", "rows": rows}
+
+
+@router.get("/live/artifacts/{artifact_id}")
+def live_artifact(artifact_id: str):
+    meta = db.get_artifact(artifact_id)
+    if not meta or not str(meta.get("scenario_id", "")).startswith("LIVE-"):
+        raise HTTPException(404, detail="unknown live artifact id")
+    if meta.get("kind") == "lime_html":
+        raise HTTPException(404, detail="per-instance artifact is redacted")
+    blob = db.get_live_artifact_blob(artifact_id)
+    if not blob:
+        raise HTTPException(404, detail="live artifact not persisted")
+    return Response(content=blob["content"], media_type=blob["content_type"],
+                    headers={"Cache-Control": "private, no-store",
+                             "X-Content-SHA256": blob["content_sha256"]})
 
 
 @router.post("/live/tick-all")

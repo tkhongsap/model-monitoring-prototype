@@ -26,8 +26,17 @@ if (!basePath) {
   );
 }
 
+const controlTowerMode = process.env.CONTROL_TOWER_MODE ?? "live";
+if (!['live', 'demo'].includes(controlTowerMode)) {
+  throw new Error(`CONTROL_TOWER_MODE must be "live" or "demo", got "${controlTowerMode}"`);
+}
+const appEntry = controlTowerMode === "demo" ? "src/AppDemo.tsx" : "src/App.tsx";
+
 export default defineConfig({
   base: basePath,
+  // Historical social/demo assets stay available only in the explicit demo build.
+  // The strict-live artifact contains only files reachable from the live entry.
+  publicDir: controlTowerMode === "live" ? false : "public",
   plugins: [
     react(),
     tailwindcss(),
@@ -49,6 +58,7 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": path.resolve(import.meta.dirname, "src"),
+      "@app-entry": path.resolve(import.meta.dirname, appEntry),
       "@assets": path.resolve(import.meta.dirname, "..", "..", "attached_assets"),
     },
     dedupe: ["react", "react-dom"],

@@ -23,6 +23,7 @@ class TickContext:
 class LaneResult:
     signals: dict[str, float | None] = field(default_factory=dict)  # SignalSpec keys (C.2)
     records: list = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)          # v1.1 window envelope
     artifacts: dict[str, str] = field(default_factory=dict)         # kind -> artifact_id
     errors: dict[str, str] = field(default_factory=dict)
 

@@ -1,63 +1,75 @@
-/** View 4 — Monitoring Lane Heatmap (PRD D.4): the signature view. */
 import { useRouter } from "@/lib/nav";
 import { HealthChip, Legend, ScrollBox, Td, Th, TierBadge } from "@/components/ui";
-import { useLive } from "@/lib/live";
+import { formatLag, rowSyncState, shortId, stateLabel, stateTone, useLive } from "@/lib/live";
 
 const LANES = ["Quality", "Safety & security", "Reliability", "Drift & degradation", "Feedback & action loop"];
 
 export default function Heatmap() {
   const router = useRouter();
-  const { rows, summary } = useLive();
+  const { rows, summary, connection, effectiveState, error } = useLive();
   if (!summary) return (
-    <div className="rounded-lg border border-slate-200 bg-white p-8 text-center text-sm text-slate-500">
-      Waiting for the monitor backend — start it on <span className="font-mono">:8000</span> and observe a window.
+    <div className={`rounded-lg border p-8 text-center text-sm ${error ? "border-red-300 bg-red-50 text-red-800" : "border-slate-200 bg-white text-slate-500"}`}>
+      {error ?? "Connecting to persisted monitor observations…"}
     </div>
   );
+
   return (
     <div>
-      <h1 className="mb-3 text-lg font-bold">Monitoring Lane Heatmap</h1>
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <h1 className="text-lg font-bold">Monitoring Lane Heatmap</h1>
+        <span className={`rounded-full border px-2 py-0.5 text-[10px] font-bold ${stateTone(effectiveState)}`}>{stateLabel(effectiveState)}</span>
+        {error && <span className="text-xs font-semibold text-red-700">{error}</span>}
+      </div>
       <ScrollBox>
         <table className="w-full">
           <thead>
             <tr>
-              <Th>Use case</Th><Th>Risk</Th>
-              {LANES.map((l) => <Th key={l}>{l.replace(" & action loop", "/action")}</Th>)}
+              <Th>Use case / evidence</Th><Th>Sync</Th><Th>Risk</Th>
+              {LANES.map((lane) => <Th key={lane}>{lane.replace(" & action loop", "/action")}</Th>)}
               <Th>Overall</Th>
             </tr>
           </thead>
           <tbody>
-            {rows.map((r: any) => (
-              <tr key={r.registry_id} className={`hover:bg-slate-50 ${r.stale ? "opacity-50" : ""}`}>
-                <Td>
-                  <button className="text-left font-semibold text-slate-800 hover:text-[#E60012]"
-                    onClick={() => router.push(`/use-case/${r.registry_id}`)}>
-                    {r.use_case_name}
-                    <span className="ml-2 font-mono text-[10px] text-slate-400">{r.registry_id}</span>
-                  </button>
-                  {r.stale && <span className="ml-2 rounded bg-amber-100 px-1.5 py-0.5 text-[9px] font-semibold text-amber-700" title="App unreachable — showing the last observed window">app offline</span>}
-                  {r.waiting && <span className="ml-2 rounded bg-sky-100 px-1.5 py-0.5 text-[9px] font-semibold text-sky-700" title="Monitoring is live but no window has been observed yet — observe the first window">waiting for first window</span>}
-                </Td>
-                <Td><TierBadge tier={r.risk_tier} /></Td>
-                {LANES.map((l) => (
-                  <Td key={l} className="text-center">
-                    <button onClick={() => router.push(`/use-case/${r.registry_id}#${encodeURIComponent(l)}`)}>
-                      <HealthChip
-                        health={r.lanes?.[l] ?? "Unknown"}
-                        striped={l === "Feedback & action loop" && !!r.feedback_unknown_reason}
-                        title={r.feedback_unknown_reason && l === "Feedback & action loop"
-                          ? r.feedback_unknown_reason
-                          : `${l} — ${r.tooltips?.[l]?.metric ?? ""}`}
-                      />
+            {rows.map((row) => {
+              const state = connection === "error" ? "error" : rowSyncState(row);
+              const digest = row.content_sha256 ?? row.window_digest;
+              return (
+                <tr key={row.registry_id} className={`hover:bg-slate-50 ${state === "stale" || state === "error" ? "bg-amber-50/40" : ""}`}>
+                  <Td>
+                    <button className="text-left font-semibold text-slate-800 hover:text-[#E60012]" onClick={() => router.push(`/use-case/${row.registry_id}`)}>
+                      {row.use_case_name}
+                      <span className="ml-2 font-mono text-[10px] text-slate-400">{row.registry_id}</span>
                     </button>
+                    <div className="mt-0.5 font-mono text-[9px] text-slate-400">
+                      batch {shortId(row.batch_id, 9)} · window {shortId(row.window_id, 9)} · digest {shortId(digest, 9)} · model {row.model_version ?? "—"} · n={row.record_count ?? "—"} · lag {formatLag(row.source_lag_ms)}
+                    </div>
                   </Td>
-                ))}
-                <Td className="text-center"><HealthChip health={r.overall} /></Td>
-              </tr>
-            ))}
+                  <Td>
+                    <span className={`whitespace-nowrap rounded-full border px-2 py-0.5 text-[9px] font-bold ${stateTone(state)}`}>{stateLabel(state)}</span>
+                  </Td>
+                  <Td><TierBadge tier={row.risk_tier} /></Td>
+                  {LANES.map((lane) => (
+                    <Td key={lane} className="text-center">
+                      <button onClick={() => router.push(`/use-case/${row.registry_id}#${encodeURIComponent(lane)}`)}>
+                        <HealthChip
+                          health={row.lanes?.[lane] ?? "Unknown"}
+                          striped={lane === "Feedback & action loop" && !!row.feedback_unknown_reason}
+                          title={row.feedback_unknown_reason && lane === "Feedback & action loop"
+                            ? row.feedback_unknown_reason
+                            : `${lane} — ${row.tooltips?.[lane]?.metric ?? "not instrumented"}`}
+                        />
+                      </button>
+                    </Td>
+                  ))}
+                  <Td className="text-center"><HealthChip health={row.overall ?? "Unknown"} /></Td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </ScrollBox>
       <Legend />
+      <p className="mt-2 text-[11px] text-slate-400">Unknown means evidence was missing, insufficient, or not instrumented; it is never promoted to Green.</p>
     </div>
   );
 }

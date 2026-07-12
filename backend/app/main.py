@@ -13,34 +13,121 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import db, seeds_loader
-from .api.routes import router
+from . import config, db, seeds_loader
+from .live_poller import poller
+
+if config.strict_live_mode():
+    from .api.live_routes import router
+else:
+    from .api.routes import router
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.engine()
-    n = seeds_loader.seed_registry()
-    print(f"[startup] registry rows: {n}")
-    yield
+    if config.strict_live_mode():
+        from .api.live_portfolio import LIVE_UCS
+        for source_id in LIVE_UCS:
+            db.ensure_live_source(source_id)
+        blockers = config.live_configuration_errors()
+        if blockers:
+            print(f"[startup] strict live configuration blocked: {'; '.join(blockers)}")
+        print("[startup] strict live plane; baked registry not loaded")
+    else:
+        n = seeds_loader.seed_registry()
+        print(f"[startup] registry rows: {n}")
+    poller().start()
+    try:
+        yield
+    finally:
+        poller().stop()
 
 
-app = FastAPI(title="AI Use Case Observability Control Tower",
-              version="1.0", lifespan=lifespan)
+app = FastAPI(
+    title="AI Use Case Observability Control Tower",
+    version="1.1", lifespan=lifespan,
+    docs_url=None if config.strict_live_mode() else "/docs",
+    redoc_url=None if config.strict_live_mode() else "/redoc",
+    openapi_url=None if config.strict_live_mode() else "/openapi.json",
+)
 app.include_router(router)
+
+
+@app.middleware("http")
+async def strict_live_route_isolation(request: Request, call_next):
+    """Make baked/scenario APIs unreachable in production, even if code is installed.
+
+    Only read-only live artifacts/observations plus service diagnostics are public.  The
+    background worker owns all live mutations; browser POSTs cannot advance cursors.
+    """
+    if config.strict_live_mode() and request.url.path.startswith("/api/"):
+        allowed_exact = {"/api/health", "/api/healthz", "/api/version", "/api/readiness"}
+        allowed = request.url.path in allowed_exact or request.url.path.startswith("/api/live/")
+        worker_poll = request.method == "POST" and request.url.path == "/api/live/poll"
+        if (request.method != "GET" and not worker_poll) or not allowed:
+            return JSONResponse({"detail": "not available in strict live mode"}, status_code=404)
+    return await call_next(request)
 
 
 @app.get("/api/health")
 def healthcheck():
-    return {"ok": True}
+    errors = config.live_configuration_errors()
+    body = {"ok": not errors, "mode": config.CONTROL_TOWER_MODE,
+            "configuration_errors": errors}
+    return JSONResponse(body, status_code=200 if not errors else 503)
 
 
 @app.get("/api/healthz")
 def healthz():
-    return {"status": "ok"}
+    errors = config.live_configuration_errors()
+    body = {"status": "ok" if not errors else "not_ready",
+            "mode": config.CONTROL_TOWER_MODE, "configuration_errors": errors}
+    return JSONResponse(body, status_code=200 if not errors else 503)
+
+
+@app.get("/api/version")
+def version():
+    producer: dict = {"git_sha": None, "status": "not_configured"}
+    if config.LIVE_PRODUCER_URL:
+        try:
+            from .adapters.telemetry_http import pull_build_version
+            producer = {**pull_build_version(config.LIVE_PRODUCER_URL), "status": "connected"}
+        except Exception as exc:  # noqa: BLE001 — build diagnostics remain available
+            producer = {"git_sha": None, "status": "error",
+                        "error": f"{type(exc).__name__}: {exc}"}
+    return {"service": "model-monitoring-prototype", "contract_version": "1.1",
+            "build_sha": config.BUILD_SHA, "monitor_git_sha": config.BUILD_SHA,
+            "producer": producer, "mode": config.CONTROL_TOWER_MODE}
+
+
+@app.get("/api/readiness")
+def readiness():
+    database_ok, database_error = True, None
+    try:
+        with db.engine().connect() as cx:
+            cx.exec_driver_sql("SELECT 1")
+    except Exception as exc:  # noqa: BLE001
+        database_ok = False
+        database_error = f"{type(exc).__name__}: {exc}"
+    configuration_errors = config.live_configuration_errors()
+    worker_required = config.strict_live_mode() and config.LIVE_POLL_SECONDS > 0
+    worker_ok = poller().running if worker_required else True
+    judge_ok = bool(config.ANTHROPIC_API_KEY) if config.strict_live_mode() else True
+    ready = database_ok and worker_ok and not configuration_errors
+    body = {
+        "status": "ready" if ready and judge_ok else ("degraded" if ready else "not_ready"),
+        "database": {"ok": database_ok, "error": database_error},
+        "poller": {"required": worker_required, "running": poller().running,
+                   "last_error": poller().last_cycle_error},
+        "real_judge": {"required": config.strict_live_mode(), "configured": judge_ok},
+        "configuration": {"ok": not configuration_errors, "errors": configuration_errors},
+        "mode": config.CONTROL_TOWER_MODE,
+    }
+    return JSONResponse(body, status_code=200 if ready and judge_ok else 503)
 
 
 # --- dashboard (built SPA), mounted LAST so the /api routes above always win ---

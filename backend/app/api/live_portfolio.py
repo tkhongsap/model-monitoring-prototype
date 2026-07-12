@@ -14,20 +14,14 @@ cycle with routes.py (routes imports this module at load).
 from __future__ import annotations
 
 import json
-import threading
 
-from .. import config
+from .. import config, db
 from ..engines.health import LANES
+from ..live_sync import portfolio_sync, source_sync
 
 LIVE_UCS = ["AICT-L01", "AICT-L02", "AICT-L03"]
 
 _DESCRIPTORS: dict[str, dict] | None = None
-
-# in-process history: uc -> signal_key -> [{tick, value, health}] (dedup by tick, bounded).
-# _HIST_LOCK makes the check-then-append atomic across overlapping tick-all worker threads.
-HIST: dict[str, dict[str, list[dict]]] = {uc: {} for uc in LIVE_UCS}
-_HIST_LOCK = threading.Lock()
-
 
 def load_descriptors() -> dict[str, dict]:
     """Read live_registry_seed.json once (cached), keyed by registry_id."""
@@ -47,7 +41,17 @@ _EXTRA_KEYS = (
     "drifted_features", "reference_auc", "model_version", "realized_pending_reason",
     "realized_label_coverage", "lime_top", "lime_instance", "offer_mix",
     "baseline_offer_mix", "acceptance_pending_reason", "judge", "judge_sample",
+    "lane_reasons", "window_id", "source_instance_id", "opened_at", "closed_at",
+    "content_sha256", "first_record_id", "last_record_id", "provenance_counts",
+    "record_count", "source_lag_ms", "observation_id", "ack_status", "ack_error",
 )
+
+
+def _cadence(tier: str) -> str:
+    return {"High": "Weekly (near-real-time alerts for critical signals)",
+            "Medium": "Monthly with sampled quality checks",
+            "Low": "Quarterly (minimum six-month confirmation)",
+            "Unknown": "Monthly until classified"}.get(tier, "Monthly until classified")
 
 
 def _tooltips(state: dict) -> dict:
@@ -71,10 +75,19 @@ def _feedback_unknown_reason(state: dict, desc: dict) -> str | None:
     return desc.get("feedback_unknown_reason")
 
 
-def _not_observed_row(desc: dict) -> dict:
+def _telemetry_status(sync: dict) -> str:
+    return {
+        "connecting": "Connecting", "catching_up": "Live — catching up",
+        "at_tail": "Live", "idle": "Live — idle", "stale": "Stale",
+        "error": "Error",
+    }.get(sync.get("sync_state"), "Unknown")
+
+
+def _not_observed_row(uc: str, desc: dict) -> dict:
     """Row for a use case whose runner has never completed a tick — this is WAITING for
     the first window, NOT 'app offline'. stale is reserved for a runner that had a good
     tick then lost telemetry (see portfolio_rows)."""
+    sync = source_sync(uc)
     return {
         **desc,
         "current_health": "Unknown",
@@ -84,9 +97,12 @@ def _not_observed_row(desc: dict) -> dict:
         "tick": None,
         "mode": "live",
         "waiting": True,
-        "stale": False,
+        "stale": sync["sync_state"] == "stale",
+        "telemetry_status": _telemetry_status(sync),
         "feedback_unknown_reason": desc.get("feedback_unknown_reason"),
         "tooltips": {lane: {"metric": "—"} for lane in LANES},
+        "errors": ({"telemetry": sync["last_error"]} if sync.get("last_error") else {}),
+        **sync,
     }
 
 
@@ -100,22 +116,30 @@ def portfolio_rows() -> list[dict]:
         desc = descs[uc]
         s = live_runner(uc).state()
         if s is None:
-            rows.append(_not_observed_row(desc))    # waiting for first window, not offline
+            rows.append(_not_observed_row(uc, desc))    # waiting for first window, not offline
             continue
         errors = s.get("errors", {})
-        offline = bool(errors.get("telemetry"))     # had a good tick, now can't reach the app
+        sync = source_sync(uc)
+        offline = sync["sync_state"] in ("stale", "error")
+        observed_overall = s.get("overall", "Unknown")
+        observed_lanes = s.get("lanes", {})
         rows.append({
             **desc,
-            "current_health": s["overall"],
-            "overall": s["overall"],
-            "lanes": s.get("lanes", {}),
+            "current_health": "Unknown" if offline else observed_overall,
+            "overall": "Unknown" if offline else observed_overall,
+            "lanes": ({lane: "Unknown" for lane in LANES} if offline else observed_lanes),
+            "last_observed_overall": observed_overall,
+            "last_observed_lanes": observed_lanes,
             "lane_kind": desc.get("lane_kind", "ml"),
             "tick": s.get("tick"),
             "mode": "live",
             "waiting": False,
             "stale": offline,
+            "telemetry_status": _telemetry_status(sync),
             "feedback_unknown_reason": _feedback_unknown_reason(s, desc),
             "tooltips": _tooltips(s),
+            "errors": errors,
+            **sync,
         })
     return rows
 
@@ -136,34 +160,24 @@ def portfolio_summary() -> dict:
                 lane_counts[lane]["Unknown"] += 1
             continue
         as_of[uc] = s.get("tick")
-        overall = s.get("overall", "Unknown")
+        sync = source_sync(uc)
+        overall = ("Unknown" if sync["sync_state"] in ("stale", "error")
+                   else s.get("overall", "Unknown"))
         overall_counts[overall] = overall_counts.get(overall, 0) + 1
-        lanes = s.get("lanes", {})
+        lanes = ({lane: "Unknown" for lane in LANES}
+                 if sync["sync_state"] in ("stale", "error") else s.get("lanes", {}))
         for lane in LANES:
             h = lanes.get(lane, "Unknown")
             lane_counts[lane][h] = lane_counts[lane].get(h, 0) + 1
+    sync = portfolio_sync(LIVE_UCS)
     return {"use_case_count": 3, "as_of": as_of,
-            "overall_counts": overall_counts, "lane_counts": lane_counts}
+            "overall_counts": overall_counts, "lane_counts": lane_counts,
+            "sync_state": sync["sync_state"], "state": sync["state"],
+            "backlog": sync["backlog"], "sync_sources": sync["sources"]}
 
 
 def record(uc: str, state: dict) -> None:
-    """Append each signal's point to the bounded history buffer on a full tick (dedup by
-    tick, thread-safe). Skips waiting/cursor-held payloads (no advanced tick)."""
-    if uc not in HIST or not state or state.get("cursor_held"):
-        return
-    tick = state.get("tick")
-    if tick is None:
-        return
-    cap = config.LIVE_HIST_MAX
-    with _HIST_LOCK:
-        buf = HIST[uc]
-        for key, sig in state.get("signals", {}).items():
-            series = buf.setdefault(key, [])
-            if any(h["tick"] == tick for h in series):
-                continue  # dedup — no duplicate tick entries
-            series.append({"tick": tick, "value": sig.get("value"), "health": sig.get("health")})
-            if cap and len(series) > cap:
-                del series[:-cap]   # keep only the trailing window (bounded memory + payload)
+    """Compatibility shim: live_runner now persists observations/history atomically."""
 
 
 def detail(uc: str) -> dict | None:
@@ -171,12 +185,11 @@ def detail(uc: str) -> dict | None:
     if uc not in LIVE_UCS:
         return None
     from ..scenario.live_runner import live_runner
-    from .routes import _cadence
-
     desc = load_descriptors()[uc]
     cadence = _cadence(desc.get("risk_tier", "Unknown"))
     s = live_runner(uc).state()
     if s is None:  # never observed — waiting for the first window (header-only, never raises)
+        sync = source_sync(uc)
         return {
             **desc,
             "cadence": cadence,
@@ -186,13 +199,17 @@ def detail(uc: str) -> dict | None:
             "signals": [],
             "lanes": {lane: "Unknown" for lane in LANES},
             "artifacts": {},
-            "errors": {},
+            "errors": ({"telemetry": sync["last_error"]} if sync.get("last_error") else {}),
             "actions": [],
             "mode": "live",
             "tick": None,
             "waiting": True,
-            "stale": False,
+            "stale": sync["sync_state"] == "stale",
+            "telemetry_status": _telemetry_status(sync),
+            **sync,
         }
+    sync = source_sync(uc)
+    offline = sync["sync_state"] in ("stale", "error")
     signals = []
     for key, sig in s.get("signals", {}).items():
         signals.append({
@@ -200,31 +217,36 @@ def detail(uc: str) -> dict | None:
             "label": sig.get("label", key),
             "lane": sig.get("lane", "Quality"),
             "value": sig.get("value"),
-            "health": sig.get("health"),
+            "health": "Unknown" if offline else sig.get("health"),
+            "last_observed_health": sig.get("health"),
             "pending_reason": sig.get("pending_reason"),  # lifted from the nested signal
             "green_bar": sig.get("green_bar"),
             "red_bar": sig.get("red_bar"),
             "unit": sig.get("unit", ""),
             "direction": sig.get("direction", ""),
             "provenance": "live",
-            "history": HIST.get(uc, {}).get(key, []),
+            "history": db.get_live_signal_history(uc, key, config.LIVE_HIST_MAX),
         })
     out = {
         **desc,
         "cadence": cadence,
         "lane_kind": desc.get("lane_kind", "ml"),
-        "current_health": s.get("overall", "Unknown"),
-        "overall": s.get("overall", "Unknown"),
+        "current_health": "Unknown" if offline else s.get("overall", "Unknown"),
+        "overall": "Unknown" if offline else s.get("overall", "Unknown"),
+        "last_observed_overall": s.get("overall", "Unknown"),
         "signals": signals,
-        "lanes": s.get("lanes", {}),
+        "lanes": ({lane: "Unknown" for lane in LANES} if offline else s.get("lanes", {})),
+        "last_observed_lanes": s.get("lanes", {}),
         "artifacts": s.get("artifacts", {}),
         "errors": s.get("errors", {}),
         "actions": [],
         "mode": "live",
         "tick": s.get("tick"),
         "waiting": False,
-        "stale": bool(s.get("errors", {}).get("telemetry")),
+        "stale": sync["sync_state"] == "stale",
         "cursor_held": bool(s.get("cursor_held")),
+        "telemetry_status": _telemetry_status(sync),
+        **sync,
     }
     for k in _EXTRA_KEYS:  # pass ML/LLM/NBA extras through verbatim when present
         if k in s:

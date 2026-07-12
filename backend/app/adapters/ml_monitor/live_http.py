@@ -27,7 +27,7 @@ from sklearn.metrics import roc_auc_score
 
 from ...datagen import churn
 from ..base import LaneResult, TickContext
-from ..telemetry_http import pull, pull_model
+from ..telemetry_http import pull, pull_model, window_metadata
 from . import engines
 
 
@@ -136,7 +136,9 @@ class LiveHttpMLAdapter:
         # build sits inside the same degrade envelope: an empty (count=0) window or a
         # schema-skewed record must never escape and crash the tick (review finding) ---
         try:
-            inf = pull(self.base_url, self.inferences_path, {"tick": t})["records"]
+            inference_env = pull(self.base_url, self.inferences_path, {"tick": t})
+            inf = inference_env["records"]
+            res.metadata.update(window_metadata(inference_env, t))
             if not inf:
                 for k in self._signal_keys:
                     res.signals[k] = None
@@ -149,6 +151,23 @@ class LiveHttpMLAdapter:
             for k in self._signal_keys:
                 res.signals[k] = None
             res.errors["telemetry"] = f"{type(e).__name__}: {e}"
+            return res
+
+        # A five-minute timeout may intentionally close an undersized window.  It is a
+        # real observation and must advance the durable cursor, but statistical metrics
+        # are not meaningful below the contract's 500-record ML window size.
+        if len(inf) < self.chunk_size:
+            for key in self._signal_keys:
+                res.signals[key] = None
+            res.records = {
+                "drifted_features": [], "reference_auc": self._reference_auc,
+                "model_version": self._version,
+                "realized_pending_reason": (
+                    f"insufficient sample: {len(inf)} of {self.chunk_size} records"),
+                "realized_label_coverage": None, "realized_window_tick": t,
+            }
+            res.errors["insufficient_sample"] = (
+                f"requires {self.chunk_size} records; observed {len(inf)}")
             return res
 
         # --- Evidently drift (reference pull is independent of the artifact) ---
@@ -187,7 +206,7 @@ class LiveHttpMLAdapter:
             elif not labels:
                 pending = "label lag"           # nothing arrived yet
             else:
-                lab = {l[self.id_field]: int(l[self._label_field]) for l in labels}
+                lab = {label[self.id_field]: int(label[self._label_field]) for label in labels}
                 pairs = [(lab[r[self.id_field]], p) for r, p in zip(inf, cur_proba)
                          if r[self.id_field] in lab]
                 matched = [y for y, _ in pairs]

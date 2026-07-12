@@ -1,13 +1,13 @@
 modules = ["nodejs-24", "python-3.12"]
 
-# Reserved VM ("gce"), NOT autoscale: the LIVE monitoring plane keeps in-process state
-# (each model's read cursor + signal history) and uses SQLite — it needs exactly one
-# always-on instance. Autoscale would run N instances / scale to zero and wipe live state.
+# Autoscale ("cloudrun"): live cursors and observations are persisted in the
+# monitor-owned database, and a renewable lease elects one polling worker across
+# concurrent instances. Browser sessions never own telemetry progress.
 [deployment]
 router = "application"
-deploymentTarget = "gce"
+deploymentTarget = "cloudrun"
 build = ["bash", "scripts/deploy-build.sh"]
-run = ["bash", "backend/run.sh"]
+run = ["bash", "scripts/deploy-run.sh"]
 
 [deployment.postBuild]
 args = ["pnpm", "store", "prune"]

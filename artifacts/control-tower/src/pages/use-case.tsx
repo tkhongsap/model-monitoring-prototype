@@ -6,34 +6,52 @@ import {
   CartesianGrid, Legend as RLegend, Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
 import { CadenceBadge, GreyChip, HealthChip, ScrollBox, Td, Th, TierBadge } from "@/components/ui";
-import { useApi, useSim } from "@/lib/sim";
-import { useLiveApi } from "@/lib/live";
+import {
+  formatAge,
+  formatLag,
+  provenanceText,
+  shortId,
+  stateLabel,
+  stateTone,
+  SyncSnapshot,
+  syncStateOf,
+  useLive,
+  useLiveResource,
+} from "@/lib/live";
 
 export default function UseCase() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
-  const { state } = useSim();
-  const isLive = !!id?.startsWith("AICT-L");
-  // Only one path fires: never feed an AICT-L0x id through the baked P-id endpoint.
-  const liveUc = useLiveApi<any>(isLive ? `/api/live/use-case/${id}` : "");
-  const bakedUc = useApi<any>(isLive ? "" : `/api/use-cases/${id}`);
-  const uc = isLive ? liveUc : bakedUc;
+  const { connection, effectiveState } = useLive();
+  const resource = useLiveResource<any>(id ? `/api/live/use-case/${id}` : "");
+  const uc = resource.data;
   const [tab, setTab] = useState(0);
-  if (!uc) return <div className="p-8 text-slate-400">Loading…</div>;
-  const isML = uc.lane_kind ? uc.lane_kind === "ml" : (id === "AICT-P02");
-  const isLiveLLM = isLive && uc.lane_kind === "llm";
+  if (!uc) return (
+    <div className={`rounded-lg border p-8 ${resource.error ? "border-red-300 bg-red-50 text-red-800" : "border-slate-200 bg-white text-slate-400"}`}>
+      {resource.error ?? "Loading persisted observation…"}
+    </div>
+  );
+  const isML = uc.lane_kind === "ml";
   const tabs = isML
     ? ["Drift (Evidently)", "Performance (NannyML)", "Explainability (LIME / SHAP)"]
-    : isLiveLLM
-      ? ["Judge scores"]
-      : ["Judge scores", "Traces", "Corpus & eval set"];
+    : ["Judge scores"];
   const deep = (uc.signals || []).length > 0;
+  const sync = uc as SyncSnapshot;
+  const syncState = resource.error || connection === "error"
+    ? "error"
+    : syncStateOf(sync.sync_state) ?? syncStateOf(sync.state) ?? effectiveState;
+  const digest = sync.content_sha256 ?? sync.window_digest;
 
   return (
     <div>
       <button className="mb-2 text-xs font-semibold text-slate-400 hover:text-[#E60012]" onClick={() => router.push("/heatmap")}>
         Heatmap › {uc.use_case_name}
       </button>
+      {resource.error && (
+        <div className="mb-3 rounded border border-red-300 bg-red-50 p-2 text-sm font-semibold text-red-800" role="alert">
+          Detail refresh failed: {resource.error}. Showing the last successfully fetched observation from {formatAge(resource.lastSuccessfulFetchAt)}.
+        </div>
+      )}
       {/* header */}
       <div className="mb-4 rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
         <div className="flex flex-wrap items-center gap-2">
@@ -42,7 +60,8 @@ export default function UseCase() {
           <span className="rounded bg-slate-800 px-2 py-0.5 text-[10px] font-bold text-white">{uc.status}</span>
           <TierBadge tier={uc.risk_tier} />
           <HealthChip health={uc.current_health} />
-          <GreyChip text={`telemetry: ${uc.telemetry_status}${uc.telemetry_status === "Live" && !isLive ? " (simulated)" : ""}`} />
+          <GreyChip text={`telemetry: ${stateLabel(syncState).toLowerCase()}`} />
+          <span className={`rounded-full border px-2 py-0.5 text-[10px] font-bold ${stateTone(syncState)}`}>{stateLabel(syncState)}</span>
           <CadenceBadge tier={uc.risk_tier} />
         </div>
         <div className="mt-2 grid gap-x-6 gap-y-0.5 text-xs text-slate-600 md:grid-cols-2">
@@ -51,6 +70,22 @@ export default function UseCase() {
           <div><b>Platform:</b> {uc.platform_or_app} · <b>Model:</b> {uc.model_or_route}</div>
           <div><b>Data:</b> <span title={uc.data_sources}>{String(uc.data_sources).slice(0, 60)}…</span> · reviewed {uc.last_reviewed} · next {uc.next_review}</div>
         </div>
+      </div>
+
+      <div className="mb-4 rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
+        <h2 className="mb-2 text-xs font-bold uppercase tracking-wider text-slate-600">Observation evidence</h2>
+        <dl className="grid gap-x-4 gap-y-1 text-xs sm:grid-cols-[auto_1fr_auto_1fr]">
+          <dt className="font-semibold text-slate-500">Window ID</dt><dd className="truncate font-mono" title={sync.window_id ?? undefined}>{shortId(sync.window_id, 18)}</dd>
+          <dt className="font-semibold text-slate-500">POC batch</dt><dd className="truncate font-mono" title={sync.batch_id ?? undefined}>{shortId(sync.batch_id, 18)}</dd>
+          <dt className="font-semibold text-slate-500">Content digest</dt><dd className="truncate font-mono" title={digest ?? undefined}>{shortId(digest, 18)}</dd>
+          <dt className="font-semibold text-slate-500">Observation ID</dt><dd className="truncate font-mono" title={sync.observation_id ?? undefined}>{shortId(sync.observation_id, 18)}</dd>
+          <dt className="font-semibold text-slate-500">Model version</dt><dd className="font-mono">{sync.model_version ?? uc.model_version ?? "—"}</dd>
+          <dt className="font-semibold text-slate-500">Producer → observed</dt><dd className="font-mono">{sync.source_tick ?? sync.producer_tick ?? "—"} → {sync.observed_tick ?? uc.tick ?? "—"}</dd>
+          <dt className="font-semibold text-slate-500">Records</dt><dd className="font-mono">{sync.record_count ?? "—"}</dd>
+          <dt className="font-semibold text-slate-500">Provenance</dt><dd>{provenanceText(sync)}</dd>
+          <dt className="font-semibold text-slate-500">Last successful pull</dt><dd>{formatAge(sync.last_success_at)}</dd>
+          <dt className="font-semibold text-slate-500">Source → monitor lag</dt><dd className="font-mono">{formatLag(sync.source_lag_ms)}</dd>
+        </dl>
       </div>
 
       {/* signals */}
@@ -72,7 +107,7 @@ export default function UseCase() {
             ))}
             {!deep && (
               <tr><td colSpan={6} className="p-4 text-center text-sm text-slate-400">
-                Shallow registry row — no tick-simulated signals. Evidence note: {uc.evidence_note || "—"}
+                No measured signals were reported for this observation. Evidence note: {uc.evidence_note || "—"}
               </td></tr>
             )}
           </tbody>
@@ -91,7 +126,7 @@ export default function UseCase() {
             ))}
           </div>
           <div className="mt-3">
-            {isML ? <MLTabs uc={uc} tab={tab} day={isLive ? (uc.tick ?? 0) : (state?.tick ?? 0)} /> : <LLMTabs uc={uc} tab={tab} />}
+            {isML ? <MLTabs uc={uc} tab={tab} windowNumber={uc.observed_tick ?? uc.tick ?? 0} /> : <LLMTabs uc={uc} />}
           </div>
         </div>
       )}
@@ -99,21 +134,6 @@ export default function UseCase() {
       {/* NBA offer mix */}
       {uc.offer_mix && <OfferMixPanel uc={uc} />}
 
-      {/* action history */}
-      <div className="mt-6">
-        <h2 className="mb-2 text-sm font-bold uppercase tracking-wider text-slate-600">Action history</h2>
-        {(uc.actions || []).length === 0 ? (
-          <div className="text-sm text-slate-400">No actions for this use case at the current tick.</div>
-        ) : (uc.actions || []).map((a: any) => (
-          <div key={a.action_id} className="mb-1 flex items-center gap-2 text-sm">
-            <span className="font-mono font-bold">{a.action_id}</span>
-            <span className="text-xs text-slate-500">
-              {(a.history || []).map((h: any) => `t${h.tick} ${h.event}`).join(" → ")}
-            </span>
-            <button className="text-xs font-semibold text-[#E60012]" onClick={() => router.push("/actions")}>View queue →</button>
-          </div>
-        ))}
-      </div>
     </div>
   );
 }
@@ -160,10 +180,10 @@ function Spark({ history, spec }: { history: any[]; spec: any }) {
 
 function ArtifactFrame({ id, height = 620 }: { id?: string; height?: number }) {
   if (!id) return <div className="rounded border border-slate-200 bg-slate-50 p-6 text-sm text-slate-400">Artifact not available for this tick.</div>;
-  return <iframe src={`/api/artifacts/${id}`} className="w-full rounded border border-slate-200 bg-white" style={{ height }} />;
+  return <iframe src={`/api/live/artifacts/${id}`} className="w-full rounded border border-slate-200 bg-white" style={{ height }} />;
 }
 
-function MLTabs({ uc, tab, day }: { uc: any; tab: number; day: number }) {
+function MLTabs({ uc, tab, windowNumber }: { uc: any; tab: number; windowNumber: number }) {
   const est = uc.signals?.find((s: any) => s.key === "estimated_roc_auc");
   const real = uc.signals?.find((s: any) => s.key === "realized_roc_auc");
   const chart = (est?.history || []).map((h: any) => ({
@@ -175,7 +195,7 @@ function MLTabs({ uc, tab, day }: { uc: any; tab: number; day: number }) {
       <p className="mb-2 text-sm"><b>Drifted features ({(uc.drifted_features || []).length}):</b>{" "}
         {(uc.drifted_features || []).join(", ") || "none reported"}</p>
       <ArtifactFrame id={uc.artifacts?.evidently_html} />
-      <p className="mt-1 text-[11px] text-slate-400">Full Evidently report for the current tick · refreshed Day {day}</p>
+      <p className="mt-1 text-[11px] text-slate-400">Full Evidently report for observed window {windowNumber}</p>
     </div>
   );
   if (tab === 1) return chart.length < 2 ? (
@@ -188,7 +208,7 @@ function MLTabs({ uc, tab, day }: { uc: any; tab: number; day: number }) {
         <ResponsiveContainer>
           <LineChart data={chart}>
             <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
-            <XAxis dataKey="tick" fontSize={11} label={{ value: "tick (simulated day)", position: "insideBottom", offset: -2, fontSize: 10 }} />
+            <XAxis dataKey="tick" fontSize={11} label={{ value: "observed window", position: "insideBottom", offset: -2, fontSize: 10 }} />
             <YAxis domain={[0.65, 0.95]} fontSize={11} />
             <Tooltip />
             <RLegend />
@@ -196,7 +216,7 @@ function MLTabs({ uc, tab, day }: { uc: any; tab: number; day: number }) {
             <ReferenceLine y={0.80} stroke="#00A66C" strokeDasharray="4 3" label={{ value: "Green bar 0.80", fontSize: 10, fill: "#00A66C" }} />
             {uc.reference_auc && <ReferenceLine y={uc.reference_auc} stroke="#94a3b8" strokeDasharray="2 4" label={{ value: `reference ${uc.reference_auc}`, fontSize: 10, fill: "#94a3b8" }} />}
             <Line type="monotone" dataKey="estimated" stroke="#0f172a" strokeWidth={2} dot={false} name="Estimated (NannyML, label-free)" />
-            <Line type="monotone" dataKey="realized" stroke="#E60012" strokeWidth={2} strokeDasharray="6 3" dot={{ r: 2 }} name="Realized (labels, 3-tick lag)" connectNulls={false} />
+            <Line type="monotone" dataKey="realized" stroke="#E60012" strokeWidth={2} strokeDasharray="6 3" dot={{ r: 2 }} name="Realized (delayed labels)" connectNulls={false} />
           </LineChart>
         </ResponsiveContainer>
       </div>
@@ -220,7 +240,7 @@ function MLTabs({ uc, tab, day }: { uc: any; tab: number; day: number }) {
         <div>
           {uc.artifacts?.shap_png
             // eslint-disable-next-line @next/next/no-img-element
-            ? <img src={`/api/artifacts/${uc.artifacts.shap_png}`} alt="SHAP global importance" className="w-full rounded border border-slate-200 bg-white" />
+            ? <img src={`/api/live/artifacts/${uc.artifacts.shap_png}`} alt="SHAP global importance" className="w-full rounded border border-slate-200 bg-white" />
             : <div className="rounded border border-slate-200 bg-slate-50 p-6 text-sm text-slate-400">SHAP not available.</div>}
           <p className="mt-1 text-[11px] text-slate-500">SHAP global feature importance (model v{uc.model_version}).</p>
         </div>
@@ -233,22 +253,21 @@ function MLTabs({ uc, tab, day }: { uc: any; tab: number; day: number }) {
   );
 }
 
-function LLMTabs({ uc, tab }: { uc: any; tab: number }) {
-  if (tab === 0) return (
+function LLMTabs({ uc }: { uc: any }) {
+  return (
     <div>
       <div className="mb-2 rounded border border-slate-300 bg-slate-100 p-2 text-[11px] font-bold text-slate-600">
         {uc.judge
-          ? `LIVE JUDGE — ${uc.judge}. Each sampled turn scored for groundedness, relevance, hallucination and PII.`
-          : "SIMULATED JUDGE — deterministic seeded simulation (count-based hallucination injection + seeded score draws). Offline/simulated only; no live-LLM mode ships in demo scope."}
+          ? `JUDGE — ${uc.judge}. Each sampled turn is scored for groundedness, relevance, hallucination and PII.`
+          : "Judge evidence unavailable — affected quality and safety signals remain Unknown."}
       </div>
       <ScrollBox>
         <table className="w-full">
-          <thead><tr><Th>Question</Th><Th>Answer (≤80 chars)</Th><Th>Ground.</Th><Th>Relev.</Th><Th>Halluc.</Th><Th>PII</Th><Th>Latency</Th></tr></thead>
+          <thead><tr><Th>Trace</Th><Th>Ground.</Th><Th>Relev.</Th><Th>Halluc.</Th><Th>PII</Th><Th>Latency</Th></tr></thead>
           <tbody>
             {(uc.judge_sample || []).map((r: any, i: number) => (
               <tr key={i} className={r.hallucination ? "bg-red-50" : ""}>
-                <Td className="max-w-[260px] truncate" title={r.question}>{r.question}</Td>
-                <Td className="max-w-[260px] truncate text-xs" title={r.answer}>{r.answer}</Td>
+                <Td className="max-w-[260px] truncate font-mono text-xs" title={r.trace_id}>{r.trace_id}</Td>
                 <Td className="font-mono">{r.groundedness}</Td>
                 <Td className="font-mono">{r.relevance}</Td>
                 <Td>{r.hallucination ? <span className="font-bold text-[#E60012]">YES</span> : "no"}</Td>
@@ -259,50 +278,6 @@ function LLMTabs({ uc, tab }: { uc: any; tab: number }) {
           </tbody>
         </table>
       </ScrollBox>
-    </div>
-  );
-  if (tab === 1) return (
-    <div>
-      <p className="mb-2 text-[11px] text-slate-500">
-        Traces read from the SQLite-backed trace store (Langfuse stub — same interface as Langfuse SDK v2) via the API.
-      </p>
-      <ScrollBox>
-        <table className="w-full">
-          <thead><tr><Th>Trace</Th><Th>Input</Th><Th>Output</Th><Th>Scores</Th><Th>Latency</Th></tr></thead>
-          <tbody>
-            {(uc.artifacts?.traces || []).slice(0, 25).map((t: any) => (
-              <tr key={t.trace_id}>
-                <Td className="font-mono text-[10px]">{t.trace_id.slice(0, 8)}…</Td>
-                <Td className="max-w-[220px] truncate" title={t.input}>{t.input}</Td>
-                <Td className="max-w-[260px] truncate text-xs" title={t.output}>{t.output}</Td>
-                <Td className="text-xs">{Object.entries(t.scores || {}).map(([k, v]: any) => `${k}=${(+v).toFixed(2)}`).join(" · ")}</Td>
-                <Td className="font-mono text-xs">{t.metadata?.latency_s}s</Td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </ScrollBox>
-    </div>
-  );
-  return (
-    <div className="grid gap-4 lg:grid-cols-2">
-      <div>
-        <h3 className="mb-1 text-sm font-bold">Corpus — 6 policy topics</h3>
-        {Object.entries(uc.corpus?.topics || {}).map(([k, v]: any) => (
-          <div key={k} className="mb-2 rounded border border-slate-200 bg-white p-2 text-xs">
-            <b className="font-mono">{k}</b>: {v}
-          </div>
-        ))}
-      </div>
-      <div>
-        <h3 className="mb-1 text-sm font-bold">Eval set — 10 questions (3 deliberately unanswerable)</h3>
-        {(uc.corpus?.qa || []).map((q: any, i: number) => (
-          <div key={i} className={`mb-1 rounded border p-2 text-xs ${q.answerable ? "border-slate-200 bg-white" : "border-amber-300 bg-amber-50"}`}>
-            <b>{q.question}</b>
-            <div className="text-slate-500">{q.reference} {!q.answerable && <span className="font-bold text-amber-700">· UNANSWERABLE (refusal test)</span>}</div>
-          </div>
-        ))}
-      </div>
     </div>
   );
 }

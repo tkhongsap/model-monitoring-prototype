@@ -4,8 +4,12 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite --config vite.config.ts --host 0.0.0.0",
-    "build": "vite build --config vite.config.ts",
+    "dev": "CONTROL_TOWER_MODE=live vite --config vite.config.ts --host 0.0.0.0",
+    "dev:demo": "CONTROL_TOWER_MODE=demo vite --config vite.config.ts --host 0.0.0.0",
+    "build": "pnpm run build:live",
+    "build:live": "CONTROL_TOWER_MODE=live vite build --config vite.config.ts",
+    "build:demo": "CONTROL_TOWER_MODE=demo vite build --config vite.config.ts",
+    "check:strict-live": "node ../../scripts/check-strict-live-bundle.mjs",
     "serve": "vite preview --config vite.config.ts --host 0.0.0.0",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },

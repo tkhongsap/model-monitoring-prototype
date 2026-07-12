@@ -16,6 +16,7 @@ import io
 import numpy as np
 import pandas as pd
 
+from ... import config
 from ...datagen import churn
 from ..base import ExplainResult, TickContext
 from ..telemetry_http import pull, pull_model
@@ -115,8 +116,12 @@ class LiveHttpExplainAdapter:
             res.errors["explain"] = f"{type(e).__name__}: {e}"
             return res
 
-        # --- LIME: highest-predicted-probability row, num_features=6 ---
+        # LIME HTML embeds the selected row's feature values.  Keep it available for
+        # local developer analysis, but never persist or expose it in the public strict
+        # live plane. SHAP below is aggregate, global feature importance.
         try:
+            if config.strict_live_mode():
+                raise PermissionError("per-instance LIME is redacted in strict live mode")
             from lime.lime_tabular import LimeTabularExplainer
             idx = int(np.argmax(proba))
             cat_idx = [order.index(c) for c in (self._categorical or []) if c in order]
@@ -130,6 +135,8 @@ class LiveHttpExplainAdapter:
             res.lime_top = [[name, float(w)] for name, w in exp.as_list()]
             res.instance = {"index": idx, "churn_probability": float(proba[idx])}
             res.artifacts["lime_html"] = self.write_artifact("lime_html", t, exp.as_html(), "html")
+        except PermissionError:
+            res.errors["lime"] = "redacted: per-instance feature values are not public"
         except Exception as e:  # noqa: BLE001
             res.errors["lime"] = f"{type(e).__name__}: {e}"
 
