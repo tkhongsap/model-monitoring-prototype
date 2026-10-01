@@ -10,6 +10,7 @@ server (:5000, proxying /api -> :8000) is used instead and the mount is skipped.
 """
 from __future__ import annotations
 
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -17,8 +18,11 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import config, db, seeds_loader
+from . import config, db, logging_setup, seeds_loader
 from .live_poller import poller
+
+logging_setup.configure(config.LOG_FORMAT)
+log = logging.getLogger(__name__)
 
 if config.strict_live_mode():
     from .api.live_routes import router
@@ -35,11 +39,12 @@ async def lifespan(app: FastAPI):
             db.ensure_live_source(source_id)
         blockers = config.live_configuration_errors()
         if blockers:
-            print(f"[startup] strict live configuration blocked: {'; '.join(blockers)}")
-        print("[startup] strict live plane; baked registry not loaded")
+            log.error("startup: strict live configuration blocked: %s", "; ".join(blockers),
+                      extra={"configuration_errors": blockers})
+        log.info("startup: strict live plane; baked registry not loaded")
     else:
         n = seeds_loader.seed_registry()
-        print(f"[startup] registry rows: {n}")
+        log.info("startup: registry rows: %d", n, extra={"registry_rows": n})
     poller().start()
     try:
         yield
@@ -122,7 +127,9 @@ def readiness():
         "status": "ready" if ready and judge_ok else ("degraded" if ready else "not_ready"),
         "database": {"ok": database_ok, "error": database_error},
         "poller": {"required": worker_required, "running": poller().running,
-                   "last_error": poller().last_cycle_error},
+                   "last_error": poller().last_cycle_error,
+                   # last cycle: duration, outcome and the last error per source (D.2)
+                   "last_cycle": poller().last_cycle},
         "real_judge": {"required": config.strict_live_mode(), "configured": judge_ok},
         "configuration": {"ok": not configuration_errors, "errors": configuration_errors},
         "mode": config.CONTROL_TOWER_MODE,
@@ -156,4 +163,4 @@ class _SPAFiles(StaticFiles):
 
 if _SPA_DIST.is_dir():  # present only after a frontend build — dev machines skip this
     app.mount("/", _SPAFiles(directory=_SPA_DIST, html=True), name="dashboard")
-    print(f"[startup] serving dashboard from {_SPA_DIST}")
+    log.info("startup: serving dashboard from %s", _SPA_DIST)

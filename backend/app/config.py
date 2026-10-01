@@ -73,6 +73,9 @@ LIVE_WORKER_TOKEN = os.getenv("LIVE_WORKER_TOKEN", "").strip()
 # set, is the public SPA origin linked from each notification.
 LIVE_ALERT_WEBHOOK_URL = os.getenv("LIVE_ALERT_WEBHOOK_URL", "").strip()
 LIVE_DASHBOARD_URL = os.getenv("LIVE_DASHBOARD_URL", "").strip().rstrip("/")
+# Process log format (spec D.2): "json" emits one JSON object per line for log shippers;
+# anything else is a plain human-readable line.
+LOG_FORMAT = _env("LOG_FORMAT", "plain").lower()
 # rolling per-signal history kept for the live dashboard sparklines/charts (bounded so a
 # long continuously-observing session doesn't grow the buffer / detail payloads without end)
 LIVE_HIST_MAX = int(_env("LIVE_HIST_MAX", "240"))
