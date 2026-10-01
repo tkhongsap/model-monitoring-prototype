@@ -88,6 +88,10 @@ class LiveHttpNBAAdapter(LiveHttpMLAdapter):
             self._baseline_mix = dict(row["payload"])
 
     def _store_baseline(self, mix: dict) -> None:
+        if self._version is None:
+            # contract 1.0 producer (no /model/artifact): the version is unknown, so the
+            # capture stays in memory rather than persisting a row keyed "None"
+            return
         try:
             db.put_baseline(self.source_id, BASELINE_KIND, self._version, mix)
         except Exception as exc:  # noqa: BLE001 — the tick still grades on the in-memory mix

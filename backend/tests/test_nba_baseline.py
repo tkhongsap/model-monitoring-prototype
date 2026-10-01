@@ -99,3 +99,18 @@ def test_migration_seven_is_recorded(isolated_db):
     with bind.begin() as cx:
         versions = list(cx.execute(db.select(db.schema_migrations.c.version)).scalars())
     assert versions == [1, 2, 3, 4, 5, 6, 7]
+
+
+def test_unversioned_capture_stays_in_memory(isolated_db, fake_producer, monkeypatch):
+    """A contract 1.0 producer serves no /model/artifact, so `_version` stays None; the
+    in-memory capture still grades the tick but no row keyed "None" is persisted."""
+    adapter = _adapter(monkeypatch, version=None)
+    base_records = fake_producer.records
+    fake_producer.records = lambda tick, kind="ml": [
+        {k: v for k, v in r.items() if k != "served_version"} if kind == "nba" else r
+        for r in base_records(tick, kind)]
+    res = adapter.monitor(UC, TickContext(tick=0, seed=42))
+    assert res.signals["recommendation_drift"] == 0.0
+    assert adapter._baseline_mix == MIX
+    assert db.get_baseline(UC, "offer_mix", None) is None
+    assert db.get_baseline(UC, "offer_mix", "None") is None
