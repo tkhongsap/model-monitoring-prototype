@@ -105,7 +105,9 @@ def deliver_pending(post=None, limit: int = 100) -> int:
                             row["alert_id"], phase, host, exc)
                 continue
             except Exception as exc:  # noqa: BLE001 — recorded, retried next cycle
-                error = f"{type(exc).__name__}: {exc}"
+                # the stored error reaches the public alerts API: never let an exception
+                # message carry the webhook URL (the secret) into it
+                error = f"{type(exc).__name__}: {exc}".replace(url, "<webhook>")
                 db.mark_alert_delivery(row["alert_id"], phase, ok=False, error=error)
                 log.warning("alert webhook %s: %s delivery to host %s failed: %s",
                             row["alert_id"], phase, host, type(exc).__name__)

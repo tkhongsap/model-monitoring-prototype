@@ -75,7 +75,8 @@ demo identifiers and secret names (`scripts/check-strict-live-bundle.mjs`, inclu
 
 Alerting: after each poll cycle the graded health of every use case (including lagged
 realized metrics) is diffed against its last snapshot; `* → Red` and `Green → Amber`
-open an alert in `live_alerts`, a return to Green resolves it, Unknown never alerts.
+open an alert in `live_alerts`, a return to Green resolves it, a current Unknown never
+opens or resolves.
 Alerts are listed by `GET /api/live/alerts` and shown on the dashboard; when
 `LIVE_ALERT_WEBHOOK_URL` is set each open and resolve is POSTed once (Slack-compatible
 body). Triage ownership: [docs/adr/0001-alert-ownership.md](docs/adr/0001-alert-ownership.md).

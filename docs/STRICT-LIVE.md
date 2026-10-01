@@ -75,8 +75,9 @@ After each runner tick in the lease-held cycle, the poller grades the use case t
 the dashboard does (latest observation plus the newest realized metric) and diffs the
 per-lane and overall health against the previous snapshot in `live_health_snapshots`.
 `* → Red` and `Green → Amber` open a row in `live_alerts`; a lane that returns to Green
-resolves every open alert on it; Unknown (stale source, pending labels, uninstrumented
-lane) never opens or resolves anything, and an open `(lane, health)` is never duplicated,
+resolves every open alert on it; a current Unknown (stale source, pending labels,
+uninstrumented lane) never opens or resolves anything, a previous Unknown followed by
+Red opens (`* → Red`), and an open `(lane, health)` is never duplicated,
 so Red → Unknown → Red is one alert. Both tables are migration 6 and hold derived
 metadata only.
 

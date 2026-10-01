@@ -72,7 +72,11 @@ own "must do" and verification so a reader can stop after any of them.
    to_health, tick, observation_id, opened_at, resolved_at, delivered_at,
    delivery_error, dedupe_key)`. An alert opens on `* → Red` and on `Green → Amber`,
    resolves when the same lane returns to Green, and is deduplicated on
-   `(source_id, lane, to_health)` while open. Unknown transitions do not alert.
+   `(source_id, lane, to_health)` while open. A current Unknown never opens or resolves;
+   a previous Unknown followed by Red opens (it is a `* → Red`). *(Amended during
+   slice C: the shipped table splits delivery into `open_` / `resolve_` status, error and
+   delivered-at columns plus `resolved_tick`, and has no `dedupe_key` column — dedupe is
+   computed from open rows. See plan Deviations C1/C2.)*
 2. **API.** `GET /api/live/alerts?uc=&open=true&limit=` on the strict router, redacted
    like other live routes. `actions` in the detail payload is replaced by `alerts`
    (open alerts for that use case).

@@ -12,7 +12,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - Live alerting (spec C). After every poll cycle each use case's graded health
   (including lagged realized metrics) is diffed against its last snapshot: `* → Red` and
-  `Green → Amber` open an alert, a return to Green resolves it, Unknown never alerts, and
+  `Green → Amber` open an alert, a return to Green resolves it, a current Unknown never
+  opens or resolves, and
   an open `(lane, health)` is never duplicated. Alerts live in the new `live_alerts`
   table (migration 6, with `live_health_snapshots`).
 - `GET /api/live/alerts?uc=&open=&limit=` on the strict router (read-only, derived

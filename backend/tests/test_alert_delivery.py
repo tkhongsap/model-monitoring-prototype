@@ -82,14 +82,16 @@ def test_resolve_payload_and_first_open_without_previous_health(webhook, monkeyp
 
 def test_delivery_retries_then_marks_once(isolated_db, webhook, caplog):
     alert_id = db.open_alert(UC, "Quality", "Amber", "Red", 12, "obs-12")
-    post = FakePost(500, ConnectionError("boom"), 200)
+    post = FakePost(500, ConnectionError(f"boom connecting to {WEBHOOK}"), 200)
     with caplog.at_level(logging.INFO, logger="app.alert_delivery"):
         assert alert_delivery.deliver_pending(post=post) == 0
         row = db.list_alerts(UC)[0]
         assert row["open_delivery_status"] == "error"
         assert row["open_delivery_error"] == "HTTP 500"
         assert alert_delivery.deliver_pending(post=post) == 0
-        assert db.list_alerts(UC)[0]["open_delivery_error"].startswith("ConnectionError")
+        stored_error = db.list_alerts(UC)[0]["open_delivery_error"]
+        assert stored_error.startswith("ConnectionError")
+        assert "SECRETPATH" not in stored_error and "<webhook>" in stored_error
         assert alert_delivery.deliver_pending(post=post) == 1
         assert alert_delivery.deliver_pending(post=post) == 0      # nothing left: no 4th post
     row = db.list_alerts(UC)[0]

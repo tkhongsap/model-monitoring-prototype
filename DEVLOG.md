@@ -50,7 +50,8 @@ depend on. The spec is
 
 - Changed: new pure engine `backend/app/engines/alerts.py` (`transitions(prev, curr,
   open_keys)`: opens on `* → Red` and `Green → Amber`, resolves on Green, dedupes on
-  `(lane, to_health)` while open, ignores Unknown both ways). New tables `live_alerts`
+  `(lane, to_health)` while open; a current Unknown never opens or resolves, a previous
+  Unknown followed by Red opens per `* → Red`). New tables `live_alerts`
   and `live_health_snapshots` (migration 6) with `open_alert`, `resolve_alerts`,
   `list_alerts`, `open_alert_keys`, `alerts_pending_delivery`, `mark_alert_delivery`.
   New `backend/app/alerting.py` evaluates each use case after its tick inside the
