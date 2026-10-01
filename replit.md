@@ -1,16 +1,23 @@
-# Model Monitoring Prototype
+# Model Monitoring Prototype — Replit notes
 
 Strict-live AI observability control tower for the `ai-use-cases` producer. The monitor
 pulls authenticated telemetry, persists cursors and observations in its own PostgreSQL
 database, evaluates real closed windows, and acknowledges matching window digests back
 to the producer. Production never serves baked scenario data.
 
+Project documentation lives in [README.md](README.md); agent instructions in
+[CLAUDE.md](CLAUDE.md). Deployment safety and exact URL mapping are in
+[docs/STRICT-LIVE.md](docs/STRICT-LIVE.md) and [docs/LIVE-DEMO.md](docs/LIVE-DEMO.md).
+
 ## Run and operate
 
-- `bash scripts/deploy-build.sh` — install dependencies, run migrations, and build the SPA
-- `bash scripts/deploy-run.sh` — start the single-port strict-live deployment
-- `cd backend && .venv/bin/python -m pytest tests` — backend regression suite
-- `cd frontend && pnpm typecheck && pnpm build` — frontend validation
+- `bash scripts/deploy-build.sh` — install workspace dependencies, build the strict-live
+  SPA, verify the bundle, and build the backend virtualenv. It does not run migrations.
+- `bash scripts/deploy-run.sh` — start the single-port strict-live deployment. The backend
+  applies its ordered schema migrations at startup under an advisory lock.
+- `scripts/post-merge.sh` (the `.replit` `postMerge` hook) only runs
+  `pnpm install --frozen-lockfile`; it never pushes a schema at the backend database.
+- Local checks are listed in [TESTING.md](TESTING.md).
 
 The root `.replit` publishes an Autoscale deployment. `scripts/deploy-run.sh` always sets
 `CONTROL_TOWER_MODE=live`; local demo mode must use a separate development command.
@@ -28,15 +35,3 @@ The root `.replit` publishes an Autoscale deployment. `scripts/deploy-run.sh` al
 
 `.env` files are excluded from Replit deployment images. Use Replit Secrets for runtime
 credentials. `ALLOW_INSECURE_LIVE_TESTING` must remain unset in production.
-
-## Architecture and evidence
-
-- Browser presence never advances telemetry; the backend poller owns progress.
-- A PostgreSQL lease elects one polling process across Autoscale instances, and a local
-  cycle guard prevents concurrent wake/background cycles inside one process.
-- Window IDs and SHA-256 content digests are persisted before cursors advance.
-- Public live APIs expose redacted observations only; demo/scenario routes return 404.
-- `GET /api/readiness`, `/api/version`, and `/api/live/sync` are the release diagnostics.
-
-The source of truth is `docs/MONITORING-CONTRACT.md`; deployment safety and exact URL
-mapping are documented in `docs/STRICT-LIVE.md` and `docs/LIVE-DEMO.md`.

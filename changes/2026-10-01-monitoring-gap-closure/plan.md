@@ -141,7 +141,7 @@ pnpm install --frozen-lockfile
   - Architecture rules: browser never advances cursors; observations immutable; demo routes 404 in live; engines pure, adapters do I/O, runners orchestrate.
   - Permissions: may run tests/builds; ask before deploying, deleting data, changing secrets; never commit `.env`.
   - Lessons section (newest first) seeded with: "When a producer window has `count=0`, store it as an observation and advance — never hold the cursor."
-- [ ] **Step 2: AGENTS.md** — three lines: title, "Instructions live in [CLAUDE.md](CLAUDE.md); this file exists so Codex-style tools find them.", link.
+- [ ] **Step 2: AGENTS.md** — three lines: title, "Instructions live in [CLAUDE.md](../../CLAUDE.md); this file exists so Codex-style tools find them.", link (relative to the repo root in the real file).
 - [ ] **Step 3: README.md** from the `project-readme` template: First success (prereqs: Python 3.12, uv, Node 24 + corepack; working dir; commands; expected result "35 passed" and `/api/readiness` JSON); Scope; Architecture (ASCII: producer → monitor poller → Postgres → API → SPA; list engines); Development table; Release and operations (Replit Autoscale, `scripts/deploy-*.sh`, readiness/version endpoints, `autoscale-poll.yml`); Repository guide linking every doc incl. `changes/`; Known limitations (LIME off in prod, sampling policy uniform, alerts absent until slice C — update per slice).
 - [ ] **Step 4: TESTING.md** from the template: required checks with working directories; change-specific proof table; reporting rule.
 - [ ] **Step 5: CHANGELOG.md** Keep-a-Changelog with `## [Unreleased]` → `### Added` (playbook docs, docs conformance test) and `### Fixed` (postMerge hook).
@@ -720,4 +720,14 @@ Per-use-case thresholds; LIME in production; §14 sampling policy; Alembic; Prom
 
 ## Deviations
 
-<Filled in during implementation.>
+- A1: the machine-local path check matches an actual home-directory path (a `Users`
+  folder followed by a user name) or a `file://` URL with a path, instead of the bare markers. The bare
+  check tripped on this plan's own test listing and on the spec's description of the rule.
+  `.pytest_cache` was added to the skipped directories (gitignored pytest cache README).
+- A1/A3: `backend/tests/test_docs.py` is committed with the A3 docs commit rather than
+  before A2, so that every commit on the branch keeps the fast suite green.
+- A3: the plan's own Step 2 text linked `CLAUDE.md` relative to `changes/…/`, which the
+  link check flagged; the plan link now points to `../../CLAUDE.md`.
+- A3: `README.md` and `TESTING.md` record that `pnpm run build:live` and
+  `pnpm run check:strict-live` cannot run on macOS (the lockfile's platform overrides
+  drop `@rollup/rollup-darwin-arm64`); the strict-live frontend workflow is the proof.
