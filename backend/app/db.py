@@ -19,7 +19,8 @@ from typing import Any
 
 from sqlalchemy import (
     Boolean, Column, Float, Integer, LargeBinary, MetaData, String, Table, Text,
-    UniqueConstraint, create_engine, delete, false, insert, inspect, or_, select, update,
+    UniqueConstraint, create_engine, delete, event, false, insert, inspect, or_, select,
+    update,
 )
 from sqlalchemy.exc import IntegrityError
 
@@ -320,8 +321,29 @@ def engine():
         if url.startswith("sqlite:"):
             kwargs["connect_args"] = {"check_same_thread": False}
         _engine = create_engine(url, **kwargs)
+        if url.startswith("sqlite:"):
+            _enable_sqlite_savepoints(_engine)
         migrate_engine(_engine)
     return _engine
+
+
+def _enable_sqlite_savepoints(eng) -> None:
+    """Make SAVEPOINT (`begin_nested`) honour the outer transaction on pysqlite.
+
+    The stdlib driver's legacy transaction mode emits COMMIT around SAVEPOINT/RELEASE,
+    so a row inserted under `begin_nested()` survived a later rollback of the enclosing
+    `engine().begin()` block (the SQLAlchemy-documented pysqlite caveat).  Postgres is
+    unaffected.  Disabling the driver's own transaction management and emitting BEGIN
+    ourselves restores one-commit semantics for `put_live_observation`, `skip_live_tick`
+    and every other dedupe-under-savepoint write in this module.
+    """
+    @event.listens_for(eng, "connect")
+    def _driver_autocommit(dbapi_connection, _record):
+        dbapi_connection.isolation_level = None
+
+    @event.listens_for(eng, "begin")
+    def _explicit_begin(conn):
+        conn.exec_driver_sql("BEGIN")
 
 
 def reset_engine() -> None:
@@ -548,13 +570,29 @@ def _fallback_digest(payload: dict) -> str:
 
 
 def put_live_observation(source_id: str, payload: dict, *, source_tick: int | None,
-                         next_tick: int, backlog: int, state: str) -> tuple[str, bool]:
+                         next_tick: int, backlog: int, state: str,
+                         acknowledge: bool = True) -> tuple[str, bool]:
     """Atomically deduplicate/persist one graded producer window and advance its cursor.
 
     `window_id` is immutable within a source.  Seeing the same id with another digest is
     an integrity error and the cursor is deliberately held for operator investigation.
+
+    `acknowledge=False` stores the row as `ack_status="skipped"`: the observation was
+    never served by the producer (an operator stub), so it must never be acknowledged
+    to it and `list_live_acks_to_retry` leaves it alone.
     """
     ensure_live_source(source_id)
+    with engine().begin() as cx:
+        return _put_live_observation(cx, source_id, payload, source_tick=source_tick,
+                                     next_tick=next_tick, backlog=backlog, state=state,
+                                     acknowledge=acknowledge)
+
+
+def _put_live_observation(cx, source_id: str, payload: dict, *, source_tick: int | None,
+                          next_tick: int, backlog: int, state: str,
+                          acknowledge: bool = True) -> tuple[str, bool]:
+    """`put_live_observation` inside the caller's transaction (`skip_live_tick` adds the
+    skipped tick's final realized rows to the same commit)."""
     now = time.time()
     observed_tick = int(payload.get("observed_tick", payload.get("tick", next_tick - 1)))
     window_id = str(payload.get("window_id") or f"{source_id}:t{observed_tick}")
@@ -582,60 +620,60 @@ def put_live_observation(source_id: str, payload: dict, *, source_tick: int | No
         "payload": json.dumps(payload, sort_keys=True),
         "observed_at": now,
         "source_lag_ms": payload.get("source_lag_ms"),
-        "ack_status": "pending" if config.LIVE_PRODUCER_URL else "not_configured",
+        "ack_status": ("pending" if config.LIVE_PRODUCER_URL else "not_configured")
+                      if acknowledge else "skipped",
         "ack_error": None,
         "acknowledged_at": None,
     }
     inserted = False
-    with engine().begin() as cx:
-        existing = cx.execute(select(live_observations).where(
-            (live_observations.c.source_id == source_id)
-            & (live_observations.c.window_id == window_id))).mappings().fetchone()
-        if existing:
+    existing = cx.execute(select(live_observations).where(
+        (live_observations.c.source_id == source_id)
+        & (live_observations.c.window_id == window_id))).mappings().fetchone()
+    if existing:
+        if existing["content_sha256"] != digest:
+            raise WindowDigestMismatch(
+                f"window {window_id} changed digest: "
+                f"{existing['content_sha256']} -> {digest}")
+        observation_id = existing["observation_id"]
+    else:
+        try:
+            with cx.begin_nested():
+                cx.execute(insert(live_observations), row)
+            inserted = True
+        except IntegrityError:  # another worker won after our SELECT
+            existing = cx.execute(select(live_observations).where(
+                (live_observations.c.source_id == source_id)
+                & (live_observations.c.window_id == window_id))).mappings().one()
             if existing["content_sha256"] != digest:
                 raise WindowDigestMismatch(
                     f"window {window_id} changed digest: "
                     f"{existing['content_sha256']} -> {digest}")
             observation_id = existing["observation_id"]
-        else:
-            try:
-                with cx.begin_nested():
-                    cx.execute(insert(live_observations), row)
-                inserted = True
-            except IntegrityError:  # another worker won after our SELECT
-                existing = cx.execute(select(live_observations).where(
-                    (live_observations.c.source_id == source_id)
-                    & (live_observations.c.window_id == window_id))).mappings().one()
-                if existing["content_sha256"] != digest:
-                    raise WindowDigestMismatch(
-                        f"window {window_id} changed digest: "
-                        f"{existing['content_sha256']} -> {digest}")
-                observation_id = existing["observation_id"]
-            if inserted:
-                history_rows = []
-                for key, sig in payload.get("signals", {}).items():
-                    value = sig.get("value")
-                    history_rows.append({
-                        "source_id": source_id, "observation_id": observation_id,
-                        "tick": observed_tick, "signal_key": key,
-                        "value": None if value is None else float(value),
-                        "health": sig.get("health", "Unknown"),
-                    })
-                if history_rows:
-                    cx.execute(insert(live_signal_history), history_rows)
-        cursor = cx.execute(select(live_source_cursors.c.next_tick,
-                                   live_source_cursors.c.observed_tick).where(
-            live_source_cursors.c.source_id == source_id)).mappings().one()
-        monotonic_next = max(int(cursor["next_tick"]), int(next_tick))
-        monotonic_observed = max(
-            int(cursor["observed_tick"]) if cursor["observed_tick"] is not None else -1,
-            observed_tick)
-        cx.execute(update(live_source_cursors).where(
-            live_source_cursors.c.source_id == source_id).values(
-                next_tick=monotonic_next, source_tick=source_tick,
-                observed_tick=monotonic_observed, state=state, backlog=max(0, int(backlog)),
-                last_checked_at=now, last_success_at=now,
-                last_error_at=None, last_error=None, updated_at=now))
+        if inserted:
+            history_rows = []
+            for key, sig in payload.get("signals", {}).items():
+                value = sig.get("value")
+                history_rows.append({
+                    "source_id": source_id, "observation_id": observation_id,
+                    "tick": observed_tick, "signal_key": key,
+                    "value": None if value is None else float(value),
+                    "health": sig.get("health", "Unknown"),
+                })
+            if history_rows:
+                cx.execute(insert(live_signal_history), history_rows)
+    cursor = cx.execute(select(live_source_cursors.c.next_tick,
+                               live_source_cursors.c.observed_tick).where(
+        live_source_cursors.c.source_id == source_id)).mappings().one()
+    monotonic_next = max(int(cursor["next_tick"]), int(next_tick))
+    monotonic_observed = max(
+        int(cursor["observed_tick"]) if cursor["observed_tick"] is not None else -1,
+        observed_tick)
+    cx.execute(update(live_source_cursors).where(
+        live_source_cursors.c.source_id == source_id).values(
+            next_tick=monotonic_next, source_tick=source_tick,
+            observed_tick=monotonic_observed, state=state, backlog=max(0, int(backlog)),
+            last_checked_at=now, last_success_at=now,
+            last_error_at=None, last_error=None, updated_at=now))
     return observation_id, inserted
 
 
@@ -643,38 +681,49 @@ class NothingToSkip(RuntimeError):
     """The source cursor is not held on an error, so there is no poisoned tick to skip."""
 
 
-def skip_live_tick(source_id: str, reason: str) -> dict:
+def skip_live_tick(source_id: str, reason: str,
+                   realized_keys: tuple[str, ...] = ()) -> dict:
     """Operator unstick (spec D.3): mark the held tick skipped and advance the cursor.
 
     Refuses unless the cursor `state` is `error` (a healthy or merely waiting source is
-    never skipped).  Writes an auditable stub observation (`record_count=0`,
-    `skipped=True`, the reason under `errors["skipped"]`, every lane Unknown) through
-    `put_live_observation`, the only path that advances a cursor.
+    never skipped).  In ONE transaction: writes an auditable stub observation
+    (`record_count=0`, `skipped=True`, the reason under `errors["skipped"]`, every lane
+    Unknown) through the `put_live_observation` core — the only path that advances a
+    cursor — and marks the tick's `realized_keys` rows final `no_labels` so the label
+    backfill never re-pulls the poisoned window.  The stub was never served by the
+    producer, so it is stored `ack_status="skipped"` and never acknowledged.
     """
     from .engines import health
-    cursor = get_live_source(source_id)
-    if cursor["state"] != "error":
-        raise NothingToSkip(
-            f"{source_id} cursor is '{cursor['state']}', not 'error': nothing to skip")
-    tick = int(cursor["next_tick"])
+    ensure_live_source(source_id)
     reason = str(reason)
-    payload = {
-        "use_case_id": source_id, "tick": tick, "observed_tick": tick, "mode": "live",
-        "skipped": True, "skip_reason": reason, "skipped_error": cursor.get("last_error"),
-        "window_id": f"{source_id}:skipped-t{tick}", "record_count": 0,
-        "signals": {}, "lanes": {lane: "Unknown" for lane in health.LANES},
-        "overall": "Unknown",
-        "lane_reasons": {lane: f"Unknown — tick skipped by operator: {reason}"
-                         for lane in health.LANES},
-        "errors": {"skipped": reason},
-        "source_tick": cursor.get("source_tick"), "producer_tick": cursor.get("source_tick"),
-    }
-    backlog = max(0, int(cursor.get("backlog") or 0) - 1)
-    state = "catching_up" if backlog else "at_tail"
-    payload.update({"backlog": backlog, "sync_state": state, "state": state})
-    observation_id, _ = put_live_observation(
-        source_id, payload, source_tick=cursor.get("source_tick"),
-        next_tick=tick + 1, backlog=backlog, state=state)
+    with engine().begin() as cx:
+        cursor = dict(cx.execute(select(live_source_cursors).where(
+            live_source_cursors.c.source_id == source_id)).mappings().one())
+        if cursor["state"] != "error":
+            raise NothingToSkip(
+                f"{source_id} cursor is '{cursor['state']}', not 'error': nothing to skip")
+        tick = int(cursor["next_tick"])
+        payload = {
+            "use_case_id": source_id, "tick": tick, "observed_tick": tick, "mode": "live",
+            "skipped": True, "skip_reason": reason, "skipped_error": cursor.get("last_error"),
+            "window_id": f"{source_id}:skipped-t{tick}", "record_count": 0,
+            "signals": {}, "lanes": {lane: "Unknown" for lane in health.LANES},
+            "overall": "Unknown",
+            "lane_reasons": {lane: f"Unknown — tick skipped by operator: {reason}"
+                             for lane in health.LANES},
+            "errors": {"skipped": reason},
+            "source_tick": cursor.get("source_tick"), "producer_tick": cursor.get("source_tick"),
+        }
+        backlog = max(0, int(cursor.get("backlog") or 0) - 1)
+        state = "catching_up" if backlog else "at_tail"
+        payload.update({"backlog": backlog, "sync_state": state, "state": state})
+        observation_id, _ = _put_live_observation(
+            cx, source_id, payload, source_tick=cursor.get("source_tick"),
+            next_tick=tick + 1, backlog=backlog, state=state, acknowledge=False)
+        for key in realized_keys:
+            _put_realized_metric(cx, source_id, tick, key, value=None, coverage=None,
+                                 status="no_labels", final=True,
+                                 reason=f"tick skipped by operator: {reason}")
     return {"use_case_id": source_id, "skipped_tick": tick, "next_tick": tick + 1,
             "observation_id": observation_id, "reason": reason,
             "previous_error": cursor.get("last_error")}
@@ -750,6 +799,15 @@ def put_realized_metric(source_id: str, tick: int, metric_key: str, *,
     Once a tick is realized, a later eviction by the producer must not erase the
     measured value; once evicted, nothing can be measured any more.
     """
+    with engine().begin() as cx:
+        _put_realized_metric(cx, source_id, tick, metric_key, value=value, coverage=coverage,
+                             status=status, reason=reason, final=final)
+
+
+def _put_realized_metric(cx, source_id: str, tick: int, metric_key: str, *,
+                         value: float | None, coverage: float | None, status: str,
+                         reason: str | None = None, final: bool | None = None) -> None:
+    """`put_realized_metric` inside the caller's transaction."""
     is_final = bool(final) if final is not None else status in REALIZED_FINAL_STATUSES
     row = {
         "source_id": source_id, "tick": int(tick), "metric_key": metric_key,
@@ -760,21 +818,20 @@ def put_realized_metric(source_id: str, tick: int, metric_key: str, *,
     where = ((live_realized_metrics.c.source_id == source_id)
              & (live_realized_metrics.c.tick == int(tick))
              & (live_realized_metrics.c.metric_key == metric_key))
-    with engine().begin() as cx:
-        existing = cx.execute(select(live_realized_metrics.c.final).where(where)).fetchone()
-        if existing is None:
-            try:
-                with cx.begin_nested():
-                    cx.execute(insert(live_realized_metrics), row)
-                return
-            except IntegrityError:  # another lease holder won after our SELECT
-                existing = cx.execute(
-                    select(live_realized_metrics.c.final).where(where)).one()
-        if existing[0]:
+    existing = cx.execute(select(live_realized_metrics.c.final).where(where)).fetchone()
+    if existing is None:
+        try:
+            with cx.begin_nested():
+                cx.execute(insert(live_realized_metrics), row)
             return
-        cx.execute(update(live_realized_metrics).where(where).values(
-            value=row["value"], coverage=row["coverage"], status=status,
-            reason=reason, computed_at=row["computed_at"], final=is_final))
+        except IntegrityError:  # another lease holder won after our SELECT
+            existing = cx.execute(
+                select(live_realized_metrics.c.final).where(where)).one()
+    if existing[0]:
+        return
+    cx.execute(update(live_realized_metrics).where(where).values(
+        value=row["value"], coverage=row["coverage"], status=status,
+        reason=reason, computed_at=row["computed_at"], final=is_final))
 
 
 def get_realized_metric(source_id: str, tick: int, metric_key: str) -> dict | None:

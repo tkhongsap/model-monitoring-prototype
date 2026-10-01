@@ -149,10 +149,11 @@ def skip_source_tick(uc: str, body: SkipRequest,
                      authorization: str | None = Header(default=None)):
     """Skip the tick a source's cursor is held on (state `error`), with a reason.
 
-    Writes a stub observation (`record_count=0`, `skipped=true`) so the window stays
-    auditable, marks its realized rows final so the backfill never re-pulls the poisoned
-    window, advances the cursor and drops the in-memory runner so it reloads the cursor.
-    409 when the cursor is not held on an error.
+    In one transaction: writes a stub observation (`record_count=0`, `skipped=true`,
+    never acknowledged to the producer) so the window stays auditable, marks its realized
+    rows final so the backfill never re-pulls the poisoned window and advances the
+    cursor; then drops the in-memory runner so it reloads the cursor. 409 when the
+    cursor is not held on an error.
     """
     _require_worker_token(authorization)
     if uc not in live_portfolio.LIVE_UCS:
@@ -162,14 +163,11 @@ def skip_source_tick(uc: str, body: SkipRequest,
         raise HTTPException(422, detail="reason must not be blank")
     from ..scenario import live_runner as live_runner_module
     try:
-        result = db.skip_live_tick(uc, reason)
+        # one transaction: stub observation, cursor advance and final realized rows
+        result = db.skip_live_tick(uc, reason,
+                                   realized_keys=live_runner_module.realized_keys_for(uc))
     except db.NothingToSkip as exc:
         raise HTTPException(409, detail=str(exc)) from exc
-    realized_keys = live_runner_module.realized_keys_for(uc)
-    for key in realized_keys:
-        db.put_realized_metric(uc, result["skipped_tick"], key, value=None, coverage=None,
-                               status="no_labels", final=True,
-                               reason=f"tick skipped by operator: {reason}")
     live_runner_module.reset_live_runner(uc)
     return {**result, "sync": source_sync(uc)}
 

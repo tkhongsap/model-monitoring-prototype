@@ -109,6 +109,65 @@ def test_skip_advances_and_audits(client, monkeypatch):
     assert db.list_alerts(UC) == []                     # Unknown never opens an alert
 
 
+def test_skip_stub_is_never_acknowledged_to_the_producer(client, monkeypatch):
+    """The stub's window was never served by the producer: with a producer configured
+    it must not be stored `pending` and the ack retry loop must never POST it."""
+    monkeypatch.setattr(config, "LIVE_PRODUCER_URL", "https://producer.example")
+    _hold_cursor(next_tick=5)
+    real, _ = db.put_live_observation(
+        UC, {"tick": 3, "window_id": "w3", "content_sha256": "b" * 64, "record_count": 500,
+             "signals": {}, "overall": "Green"},
+        source_tick=7, next_tick=5, backlog=3, state="catching_up")
+    db.mark_live_error(UC, "TelemetryIntegrityError: digest")
+    response = client.post(f"/api/live/sources/{UC}/skip",
+                           json={"reason": "poisoned window"}, headers=AUTH)
+    assert response.status_code == 200, response.text
+    stub = db.get_live_observation_by_tick(UC, 5)
+    assert stub["ack_status"] == "skipped" and stub["ack_error"] is None
+    retriable = {r["observation_id"] for r in db.list_live_acks_to_retry()}
+    assert stub["observation_id"] not in retriable
+    assert real in retriable                                 # genuine windows still retry
+
+    posted: list[str] = []
+
+    def fake_ack(base_url, *, window_id, observation_id, content_sha256):
+        posted.append(window_id)
+
+    monkeypatch.setattr(live_runner_module, "acknowledge_observation", fake_ack)
+    summary = live_runner_module.retry_pending_acknowledgements()
+    assert f"{UC}:skipped-t5" not in posted
+    assert summary["attempted"] == summary["acknowledged"] == len(posted) > 0
+    assert db.get_live_observation_by_tick(UC, 5)["ack_status"] == "skipped"
+    # reset-ack leaves the stub alone too (nothing poisoned to abandon)
+    client.post(f"/api/live/sources/{UC}/reset-ack", headers=AUTH)
+    assert db.get_live_observation_by_tick(UC, 5)["ack_status"] == "skipped"
+
+
+def test_skip_is_one_transaction(client, monkeypatch):
+    """If finalising the realized rows fails, the cursor must still be held so the
+    operator can retry the skip; a half-applied skip would let the backfill re-pull the
+    poisoned window."""
+    _hold_cursor(next_tick=5)
+
+    def boom(cx, *args, **kwargs):
+        raise RuntimeError("realized write failed")
+
+    monkeypatch.setattr(db, "_put_realized_metric", boom)
+    with pytest.raises(RuntimeError, match="realized write failed"):
+        client.post(f"/api/live/sources/{UC}/skip", json={"reason": "x"}, headers=AUTH)
+    cursor = db.get_live_source(UC)
+    assert cursor["state"] == "error" and cursor["next_tick"] == 5
+    assert db.get_live_observation_by_tick(UC, 5) is None
+    assert db.get_realized_metric(UC, 5, "realized_roc_auc") is None
+
+    monkeypatch.undo()
+    monkeypatch.setattr(config, "LIVE_WORKER_TOKEN", TOKEN)
+    response = client.post(f"/api/live/sources/{UC}/skip", json={"reason": "x"}, headers=AUTH)
+    assert response.status_code == 200, response.text   # the retry succeeds
+    assert db.get_live_source(UC)["next_tick"] == 6
+    assert db.get_realized_metric(UC, 5, "realized_roc_auc")["final"] is True
+
+
 def test_skip_rejects_blank_reason_and_unknown_use_case(client):
     _hold_cursor()
     assert client.post(f"/api/live/sources/{UC}/skip", json={"reason": "  "},
@@ -144,7 +203,8 @@ def test_reset_ack(client, monkeypatch):
 def test_other_live_posts_are_still_unreachable(client):
     for path in ("/api/live/alerts", "/api/live/observations", "/api/live/tick-all",
                  "/api/live/reset", "/api/live/sync", f"/api/live/use-case/{UC}",
-                 "/api/live/sources", "/api/live/sources"):
+                 "/api/live/sources", f"/api/live/sources/{UC}/anything",
+                 f"/api/live/sources/{UC}/skip/extra"):
         response = client.post(path, headers=AUTH)
         assert response.status_code == 404, path
         assert response.json() == {"detail": "not available in strict live mode"}, path
