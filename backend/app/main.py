@@ -11,6 +11,7 @@ server (:5000, proxying /api -> :8000) is used instead and the mount is skipped.
 from __future__ import annotations
 
 import logging
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -75,7 +76,8 @@ async def strict_live_route_isolation(request: Request, call_next):
         allowed = path in allowed_exact or path.startswith("/api/live/")
         # the only mutating surface: the worker-token poll and operator unstick routes
         worker_post = request.method == "POST" and (
-            path == "/api/live/poll" or path.startswith("/api/live/sources/"))
+            path == "/api/live/poll"
+            or re.fullmatch(r"/api/live/sources/[^/]+/(skip|reset-ack)", path) is not None)
         if (request.method != "GET" and not worker_post) or not allowed:
             return JSONResponse({"detail": "not available in strict live mode"}, status_code=404)
     return await call_next(request)
