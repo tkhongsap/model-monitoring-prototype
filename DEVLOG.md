@@ -35,14 +35,48 @@ depend on. The spec is
 
 ## Current plan
 
-1. Slice A — playbook baseline and `postMerge` fix: in progress (this branch).
-2. Slice B — monitoring correctness (`count=0` observation, label-lag backfill): not started.
+1. Slice A — playbook baseline and `postMerge` fix: merged (#9).
+2. Slice B — monitoring correctness (`count=0` observation, label-lag backfill): in
+   progress (this branch, `fix/count-zero-and-label-backfill`).
 3. Slice C — alerting (transition state machine, API, webhook, UI, ADR 0001): not started.
 4. Slice D — operational resilience (HTTP retry, structured logging, operator skip, NBA
    baseline persistence): not started.
 5. Slice E — repository hygiene and contract strictness: not started.
 
 ## Work log
+
+### 2026-10-01 — count=0 windows and label-lag realized metrics (slice B)
+
+- Changed: `backend/app/adapters/ml_monitor/live_http.py` stores a `count=0` window as an
+  observation (`errors["empty_window"]`, reason "empty window", NBA Feedback/mix pending)
+  and uses the new pure `realized.join_realized`; `telemetry_http.pull` raises
+  `WindowEvicted` on 404. New `live_realized_metrics` table (migration 4) with
+  `put_realized_metric` (realized/evicted rows are final), `latest_realized`,
+  `realized_history`, `ticks_needing_realization`. New `backend/app/label_backfill.py`
+  revisits ticks in `[t - L - 1, t)` after each observed tick and while waiting at the tail
+  (`L` from `/telemetry/meta`, default 3), verifies the re-pulled window digest against the
+  stored observation, and writes `realized` / `pending` / `insufficient_coverage` /
+  `single_class` / `no_labels` / `evicted` / `error`. New `backend/app/realized_view.py`
+  grades the detail, portfolio rows and summary on the latest realized value with
+  `as_of_tick`; runners persist `rollup_meta` so the rollup can be recomputed at read time.
+- Evidence: from `backend/`, `.venv/bin/python -m pytest -q -m "not slow"` → 75 passed,
+  9 deselected (40 before this slice). New tests: `test_realized_join.py`,
+  `test_count_zero_window.py`, `test_realized_store.py`, `test_label_backfill.py`,
+  `test_realized_view.py`; shared `tests/conftest.py` carries `isolated_db` and a
+  deterministic `fake_producer`. No file under `artifacts/`, `scripts/`, `lib/` or the
+  workspace manifests changed, so the pnpm checks were not rerun. Unavailable: real
+  producer, Langfuse, live Claude judge.
+- Learned: the backfill cannot append to `live_signal_history` (its unique key is
+  `(observation_id, signal_key)` and the original observation already holds the pending
+  row), so realized sparklines come from `live_realized_metrics`. In the fake-producer
+  tests `estimated_roc_auc` is unmeasured (no model artifact) and is not a reasoned
+  exclusion, so the Quality lane stays Unknown even when the realized AUC is Green — the
+  rollup is doing what it should.
+- Remaining: an undersized (<500 record) window is never realized by the backfill (same
+  rule as the live tick; its row stays `no_labels` with an "insufficient sample" reason).
+  The spec's "`available_at_tick` ≤ current tick with no labels ⇒ final `no_labels`" rule
+  is approximated by the bounded window: a tick leaves the backfill window after
+  `L + 1` ticks and its last status stands. Slices C–E below.
 
 ### 2026-10-01 — audit and playbook baseline
 
@@ -69,14 +103,6 @@ depend on. The spec is
 
 ## Known gaps
 
-- `count=0` window handled as an error (contract §6): the cursor holds forever and every
-  later window is never observed. Impact: a quiet hour stalls monitoring for that use case.
-  Trigger: slice B. Evidence: `backend/app/adapters/ml_monitor/live_http.py` empty branch,
-  `backend/app/scenario/live_runner.py` `_commit_tick`.
-- Realized metrics with label lag (contract §7) not met at the tail: labels are pulled
-  only for the tick being observed, so `realized_roc_auc` and NBA `acceptance_rate` stay
-  Unknown indefinitely. Impact: the Performance lane never grades on real outcomes.
-  Trigger: slice B.
 - No alert on Red: `backend/app/api/live_portfolio.py` hard-codes `actions: []`; no
   transition detection, persistence or delivery. Impact: operators must watch the board.
   Trigger: slice C.

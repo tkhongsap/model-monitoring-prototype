@@ -125,10 +125,11 @@ Layout: `backend/app/engines/` are pure functions, `backend/app/adapters/` do I/
 
 ## Known limitations
 
-- A producer window with `count=0` is treated as an error and holds the source cursor
-  (fixed in the monitoring-correctness slice; see [DEVLOG.md](DEVLOG.md)).
-- Labels are joined only for the tick being observed, so realized AUC and NBA
-  acceptance rate stay Unknown at the tail of the stream until the label-lag backfill lands.
+- Realized ROC-AUC and NBA acceptance rate lag the observed tick by the producer's
+  `label_lag_ticks` / `reward_lag_ticks`; the Performance and Feedback lanes grade on the
+  latest realized tick (shown as `as_of_tick`), not on the tick being observed. A window
+  below 500 records is never realized, and a window the producer evicts (404) before its
+  labels arrive stays `evicted`.
 - No alerting exists in the live plane: Red/Amber transitions are visible on the board
   only; the detail payload returns `actions: []`.
 - Producer HTTP calls have no retry or backoff; a stuck cursor has no operator endpoint.

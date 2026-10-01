@@ -731,3 +731,27 @@ Per-use-case thresholds; LIME in production; §14 sampling policy; Alembic; Prom
 - A3: `README.md` and `TESTING.md` record that `pnpm run build:live` and
   `pnpm run check:strict-live` cannot run on macOS (the lockfile's platform overrides
   drop `@rollup/rollup-darwin-arm64`); the strict-live frontend workflow is the proof.
+- B2: the `fake_producer` fixture (in `backend/tests/conftest.py`) makes empty ticks
+  opt-in (`fake_producer.empty.add(0)`) instead of tick 0 always being `count=0`, because
+  the B4 tests need tick 0 to carry records; it also scripts partial label coverage
+  (`release_labels(t, coverage=0.4)`) and NBA-shaped windows. `empty_window: True` is
+  lifted into the graded payload (and the detail's pass-through keys) so the stored
+  observation says so, not only the adapter's `records`.
+- B3: the new tests use the shared `isolated_db` fixture rather than
+  `isolated_live_db`; `test_live_release_hardening.py` now pins the migration list as
+  `[1, 2, 3, 4]` because migration 4 exists. `clear_live_state` also clears
+  `live_realized_metrics`.
+- B4: the runners share one module-level `_backfill_labels(runner, meta, t)` instead of
+  a `_backfill` method on each class, and the current tick's realized row is written by
+  `label_backfill.record_current_tick` from `_commit_tick`. `realize_tick` treats an
+  undersized (<500) or empty window as `no_labels` rather than realizing a metric the
+  live tick would have refused. Backfill is skipped when `/telemetry/meta` itself failed
+  (no `meta`), since the producer is unreachable.
+- B4 (spec §B.3): realized values are not appended to `live_signal_history` — its unique
+  key `(observation_id, signal_key)` is already taken by the pending row stored with the
+  observation. Realized sparklines are served from `live_realized_metrics`
+  (`db.realized_history`), as the plan's B5 says.
+- B5: `apply_realized` also runs in `portfolio_summary()` (spec B.4 names the portfolio
+  rollup); detail signals gain `as_of_tick` and `coverage`, and the payload gains
+  `realized_as_of_tick` / `acceptance_as_of_tick`. For observations stored before
+  `rollup_meta` existed the view reconstructs the hand-set lanes from `lane_reasons`.

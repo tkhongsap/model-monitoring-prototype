@@ -84,8 +84,8 @@ remaining risk. Commit messages use Conventional Commits.
 
 - When a producer window has `count=0`, store it as an observation and advance —
   never hold the cursor. A missing window (404) and an empty window are different
-  statements (contract §6). Implemented in slice B of
-  `changes/2026-10-01-monitoring-gap-closure/`; until it merges, `DEVLOG.md` Known
-  gaps records that the cursor is still held.
+  statements (contract §6). Realized metrics for lagged labels go in
+  `live_realized_metrics` via `backend/app/label_backfill.py`; never rewrite a stored
+  observation to add them.
 - The Replit `postMerge` hook must not run a JS schema push; the Python backend owns
   `DATABASE_URL` and migrates at startup.

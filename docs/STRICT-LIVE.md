@@ -37,7 +37,25 @@ producer acknowledgements remain durable and are retried on later lease cycles.
 
 Closed churn/NBA windows below 500 records and chatbot windows below 8 traces are
 persisted as real observations, but statistical health stays `Unknown` with an explicit
-insufficient-sample reason. Public observations omit raw chat input/output and
+insufficient-sample reason. A closed window with `count=0` is likewise a real observation
+(every signal `Unknown`, reason "empty window") and advances the cursor; only a missing
+window (HTTP 404) or an integrity error holds it.
+
+## Label-lag backfill
+
+Labels (churn) and rewards (NBA) arrive `label_lag_ticks` / `reward_lag_ticks` after a
+window closes (contract §7; the monitor reads the lag from `/telemetry/meta`, default 3).
+The observation for tick *t* therefore records realized metrics as `pending`. Inside the
+same lease-held cycle, after observing *t* and while waiting at the tail, each runner
+revisits the ticks in `[t - L - 1, t)`, re-pulls their inferences, verifies the digest
+against the stored observation, joins the labels and writes one row per
+`(source_id, tick, metric_key)` to `live_realized_metrics` with status `realized`,
+`pending`, `insufficient_coverage` (below 50 %), `single_class`, `no_labels`, `evicted`
+(the producer answered 404; final) or `error` (digest changed; retried). `realized` and
+`evicted` rows are never overwritten, and the backfill never rewrites an observation or
+touches the cursor. `GET /api/live/use-case/{uc}` and the portfolio grade
+`realized_roc_auc` and `acceptance_rate` on the most recent `realized` tick, reported as
+`as_of_tick`; with no realized row the lane stays reasoned-Unknown with its pending reason. Public observations omit raw chat input/output and
 per-instance LIME values. Live artifact bytes are served from PostgreSQL, not an
 Autoscale filesystem; per-instance LIME HTML is not public.
 
