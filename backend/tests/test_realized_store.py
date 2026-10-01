@@ -88,8 +88,66 @@ def test_clear_live_state_removes_realized_rows(isolated_db):
     assert db.get_realized_metric("AICT-L03", 1, KEY) is None
 
 
-def test_migration_four_is_recorded(isolated_db):
+def test_migrations_four_and_five_are_recorded(isolated_db):
     bind = db.engine()
     with bind.begin() as cx:
         versions = list(cx.execute(db.select(db.schema_migrations.c.version)).scalars())
-    assert versions == [1, 2, 3, 4]
+    assert versions == [1, 2, 3, 4, 5]
+
+
+def test_final_flag_defaults_from_status_and_can_be_forced(isolated_db):
+    db.put_realized_metric(UC, 1, KEY, value=0.8, coverage=1.0, status="realized")
+    db.put_realized_metric(UC, 2, KEY, value=None, coverage=0.0, status="pending",
+                           reason="label lag")
+    db.put_realized_metric(UC, 3, KEY, value=None, coverage=0.0, status="no_labels",
+                           reason="no labels published by tick 6 (due at tick 6)", final=True)
+    assert db.get_realized_metric(UC, 1, KEY)["final"] is True
+    assert db.get_realized_metric(UC, 2, KEY)["final"] is False
+    assert db.get_realized_metric(UC, 3, KEY)["final"] is True
+    # a forced-final no_labels row is as immutable as a realized one
+    db.put_realized_metric(UC, 3, KEY, value=0.9, coverage=1.0, status="realized")
+    row = db.get_realized_metric(UC, 3, KEY)
+    assert row["status"] == "no_labels" and row["value"] is None and row["final"] is True
+    assert db.latest_realized(UC, KEY)["tick"] == 1
+
+
+def test_forced_final_no_labels_leaves_the_backfill_window(isolated_db):
+    for t in range(4):
+        db.put_live_observation(UC, _payload(t), source_tick=t, next_tick=t + 1,
+                                backlog=0, state="at_tail")
+    db.put_realized_metric(UC, 0, KEY, value=None, coverage=0.0, status="no_labels",
+                           reason="overdue", final=True)
+    db.put_realized_metric(UC, 1, KEY, value=None, coverage=0.0, status="no_labels",
+                           reason="empty window")                       # not forced: revisited
+    db.put_realized_metric(UC, 2, KEY, value=None, coverage=0.0, status="pending")
+    assert db.ticks_needing_realization(UC, KEY, 0, 4) == [1, 2, 3]
+
+
+def test_pending_ticks_below(isolated_db):
+    db.put_realized_metric(UC, 0, KEY, value=None, coverage=0.0, status="pending")
+    db.put_realized_metric(UC, 1, KEY, value=None, coverage=0.0, status="error", reason="x")
+    db.put_realized_metric(UC, 2, KEY, value=None, coverage=0.0, status="pending")
+    db.put_realized_metric(UC, 5, KEY, value=None, coverage=0.0, status="pending")
+    db.put_realized_metric("AICT-L03", 0, KEY, value=None, coverage=0.0, status="pending")
+    assert db.pending_ticks_below(UC, KEY, 4) == [0, 2]
+    assert db.pending_ticks_below(UC, KEY, 0) == []
+
+
+def test_migration_5_backfills_final_for_existing_rows(isolated_db):
+    """A database created before migration 5 gets `final` set from the stored status."""
+    bind = db.engine()
+    with bind.begin() as cx:
+        cx.exec_driver_sql("DROP TABLE live_realized_metrics")
+        cx.exec_driver_sql("DELETE FROM schema_migrations WHERE version IN (4, 5)")
+        cx.exec_driver_sql(
+            "CREATE TABLE live_realized_metrics (source_id VARCHAR NOT NULL, tick INTEGER "
+            "NOT NULL, metric_key VARCHAR NOT NULL, value FLOAT, coverage FLOAT, status "
+            "VARCHAR NOT NULL, reason TEXT, computed_at FLOAT NOT NULL, "
+            "CONSTRAINT uq_live_realized_metric UNIQUE (source_id, tick, metric_key))")
+        for t, status in ((0, "realized"), (1, "evicted"), (2, "pending"), (3, "no_labels")):
+            cx.exec_driver_sql(
+                "INSERT INTO live_realized_metrics (source_id, tick, metric_key, status, "
+                f"computed_at) VALUES ('{UC}', {t}, '{KEY}', '{status}', 0.0)")
+    assert db.migrate_engine(bind) == [4, 5]
+    finals = {t: db.get_realized_metric(UC, t, KEY)["final"] for t in range(4)}
+    assert finals == {0: True, 1: True, 2: False, 3: False}

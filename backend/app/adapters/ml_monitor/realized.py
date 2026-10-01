@@ -28,6 +28,9 @@ class RealizedResult:
     status: str
     matched: list[int] = field(default_factory=list)
     reason: str | None = None
+    # Set by the backfill caller when a non-value status is nevertheless final (labels
+    # overdue per the producer's `available_at_tick`); never set by `join_realized`.
+    final: bool = False
 
 
 def join_realized(inferences: list[dict], labels: list[dict], *, id_field: str,

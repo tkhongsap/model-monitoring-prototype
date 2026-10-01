@@ -186,3 +186,120 @@ def test_nba_backfill_realizes_acceptance_rate(isolated_db, fake_producer):
     acc = db.get_realized_metric("AICT-L03", 0, "acceptance_rate")
     assert auc["status"] == "realized" and auc["value"] == 1.0
     assert acc["status"] == "realized" and acc["value"] == 0.5 and acc["coverage"] == 1.0
+
+
+def test_overdue_tick_without_labels_is_final_no_labels(isolated_db, fake_producer):
+    """Spec B.2: labels never arrive -> `no_labels` once available_at_tick has passed."""
+    runner = _runner()
+    fake_producer.latest = 2
+    runner.tick()
+    runner.tick()                       # ticks 0, 1 observed; labels due at 3, 4
+    fake_producer.latest = 5
+    runner.tick()                       # observes 2: tick 0 due at 3 > 2 -> still pending
+    assert db.get_realized_metric(UC, 0, KEY)["status"] == "pending"
+    runner.tick()                       # observes 3: tick 0 due at 3 <= 3 -> done
+    row = db.get_realized_metric(UC, 0, KEY)
+    assert row["status"] == "no_labels" and row["final"] is True
+    assert "due at tick 3" in row["reason"] and row["value"] is None
+    assert db.get_realized_metric(UC, 1, KEY)["status"] == "pending"   # due at 4
+    # final: labels published after the due tick are not picked up, and the producer is
+    # not asked for that window again
+    fake_producer.release_labels(0)
+    fake_producer.calls.clear()
+    runner.tick()
+    assert db.get_realized_metric(UC, 0, KEY)["status"] == "no_labels"
+    assert ("/telemetry/inferences", {"tick": 0}) not in fake_producer.calls
+    assert db.latest_realized(UC, KEY) is None
+
+
+def test_pending_ticks_that_left_the_window_are_swept(isolated_db, fake_producer, monkeypatch):
+    """A producer outage spanning the whole window must not leave `pending` rows forever."""
+    runner = _runner()
+    fake_producer.latest = 2
+    runner.tick()
+    runner.tick()                       # ticks 0, 1 pending
+    real_pull = fake_producer.pull
+
+    def labels_down(base, path, params=None, timeout=30.0):
+        if path == "/telemetry/labels":
+            raise ConnectionError("labels service down")
+        return real_pull(base, path, params, timeout)
+
+    monkeypatch.setattr(live_http, "pull", labels_down)
+    fake_producer.latest = 8
+    for _ in range(6):
+        runner.tick()                   # observes 2..7; every backfill cycle breaks
+    assert db.get_live_source(UC)["next_tick"] == 8
+    assert db.get_realized_metric(UC, 0, KEY)["status"] == "pending"
+    assert db.get_realized_metric(UC, 7, KEY)["status"] == "pending"   # labels pull failed
+    monkeypatch.setattr(live_http, "pull", real_pull)
+    out = runner.tick()                 # waiting at 8: window [4, 8) plus stragglers 0..3
+    assert out.get("waiting") is True
+    for t in range(6):                  # due ticks 3..8 have all passed by tick 8
+        row = db.get_realized_metric(UC, t, KEY)
+        assert row["status"] == "no_labels" and row["final"] is True, (t, row)
+    assert db.get_realized_metric(UC, 6, KEY)["status"] == "pending"    # due at 9
+    assert db.get_realized_metric(UC, 7, KEY)["status"] == "pending"    # due at 10
+    fake_producer.calls.clear()
+    runner.tick()
+    assert all(params.get("tick") not in range(6)
+               for path, params in fake_producer.calls if params)
+
+
+def test_labels_404_before_due_tick_is_pending_and_retried(isolated_db, fake_producer, monkeypatch):
+    """Only the inference re-pull proves eviction; a 404 on the labels window is not final."""
+    runner = _runner()
+    fake_producer.latest = 2
+    runner.tick()
+    runner.tick()
+    real_pull = fake_producer.pull
+
+    def labels_404(base, path, params=None, timeout=30.0):
+        if path == "/telemetry/labels":
+            raise telemetry_http.WindowEvicted(f"{path} tick={params['tick']} not available (404)")
+        return real_pull(base, path, params, timeout)
+
+    monkeypatch.setattr(live_http, "pull", labels_404)
+    fake_producer.latest = 3
+    runner.tick()                       # observes 2; backfills 0, 1 (due 3, 4 > 2)
+    row = db.get_realized_metric(UC, 0, KEY)
+    assert row["status"] == "pending" and "404" in row["reason"] and row["final"] is False
+    assert db.get_live_source(UC)["state"] != "error"
+    monkeypatch.setattr(live_http, "pull", real_pull)
+    fake_producer.release_labels(0)
+    runner.tick()                       # waiting at 3: retried and realized
+    assert db.get_realized_metric(UC, 0, KEY)["status"] == "realized"
+
+
+def test_labels_404_after_due_tick_is_final_no_labels(isolated_db, fake_producer, monkeypatch):
+    runner = _runner()
+    fake_producer.latest = 2
+    runner.tick()
+    runner.tick()
+    real_pull = fake_producer.pull
+
+    def labels_404(base, path, params=None, timeout=30.0):
+        if path == "/telemetry/labels":
+            raise telemetry_http.WindowEvicted(f"{path} tick={params['tick']} not available (404)")
+        return real_pull(base, path, params, timeout)
+
+    monkeypatch.setattr(live_http, "pull", labels_404)
+    fake_producer.latest = 5
+    runner.tick()
+    runner.tick()                       # observes 3: tick 0 due at 0 + 3 <= 3
+    row = db.get_realized_metric(UC, 0, KEY)
+    assert row["status"] == "no_labels" and row["final"] is True and "404" in row["reason"]
+    assert db.get_realized_metric(UC, 1, KEY)["status"] == "pending"
+
+
+def test_nba_overdue_tick_is_final_for_both_keys(isolated_db, fake_producer):
+    runner = live_runner_module.LiveNBARunner(nba_url="https://producer.test")
+    fake_producer.latest = 2
+    runner.tick()
+    runner.tick()
+    fake_producer.latest = 5
+    runner.tick()
+    runner.tick()
+    for key in (KEY, "acceptance_rate"):
+        row = db.get_realized_metric("AICT-L03", 0, key)
+        assert row["status"] == "no_labels" and row["final"] is True, (key, row)

@@ -18,8 +18,8 @@ import uuid
 from typing import Any
 
 from sqlalchemy import (
-    Column, Float, Integer, LargeBinary, MetaData, String, Table, Text, UniqueConstraint,
-    create_engine, delete, insert, inspect, or_, select, update,
+    Boolean, Column, Float, Integer, LargeBinary, MetaData, String, Table, Text,
+    UniqueConstraint, create_engine, delete, false, insert, inspect, or_, select, update,
 )
 from sqlalchemy.exc import IntegrityError
 
@@ -165,9 +165,13 @@ live_signal_history = Table(
 )
 
 # Label-lag realized metrics (contract §7).  Labels for a window arrive ticks after the
-# window closed, so realized values live here and in live_signal_history — never by
-# rewriting the immutable observation payload.  One row per (source, tick, metric); a
-# row whose status is final (realized, evicted) is never overwritten.
+# window closed, so realized values live ONLY here — never by rewriting the immutable
+# observation payload, and never in live_signal_history (its rows are written once with
+# the observation and are not updated; realized sparklines come from `realized_history`).
+# One row per (source, tick, metric).  `final` says the backfill is done with the tick:
+# set for `realized` and `evicted`, and for `no_labels` once the producer's
+# `available_at_tick` has passed with no labels (spec B.2).  A final row is never
+# overwritten.
 live_realized_metrics = Table(
     "live_realized_metrics", metadata,
     Column("source_id", String, nullable=False),
@@ -178,9 +182,13 @@ live_realized_metrics = Table(
     Column("status", String, nullable=False),
     Column("reason", Text),
     Column("computed_at", Float, nullable=False),
+    Column("final", Boolean, nullable=False, server_default=false()),
     UniqueConstraint("source_id", "tick", "metric_key", name="uq_live_realized_metric"),
 )
 
+# Statuses that are final on their own.  `no_labels` is final only when the writer says
+# so (labels overdue); `pending`, `insufficient_coverage`, `single_class` and `error` are
+# revisited by the backfill.
 REALIZED_FINAL_STATUSES = frozenset({"realized", "evicted"})
 
 live_worker_leases = Table(
@@ -205,6 +213,16 @@ def migrate_engine(bind) -> list[int]:
             "CREATE INDEX IF NOT EXISTS ix_live_observations_batch_id "
             "ON live_observations(batch_id)")
 
+    def add_realized_final(cx) -> None:
+        columns = {column["name"] for column in inspect(cx).get_columns("live_realized_metrics")}
+        if "final" not in columns:
+            literal = "FALSE" if cx.dialect.name == "postgresql" else "0"
+            cx.exec_driver_sql("ALTER TABLE live_realized_metrics ADD COLUMN final BOOLEAN "
+                               f"NOT NULL DEFAULT {literal}")
+        cx.execute(update(live_realized_metrics).where(
+            live_realized_metrics.c.status.in_(sorted(REALIZED_FINAL_STATUSES))).values(
+                final=True))
+
     migrations = [
         (1, "initial monitor schema", lambda cx: metadata.create_all(bind=cx)),
         (2, "durable live artifact blobs",
@@ -212,6 +230,7 @@ def migrate_engine(bind) -> list[int]:
         (3, "scheduled POC batch correlation", add_live_batch_id),
         (4, "label-lag realized metrics",
          lambda cx: live_realized_metrics.create(bind=cx, checkfirst=True)),
+        (5, "realized-metric finality flag", add_realized_final),
     ]
     applied_now: list[int] = []
     # The local lock also makes SQLite thread-contention tests deterministic. Managed
@@ -627,25 +646,29 @@ def get_live_signal_history(source_id: str, signal_key: str, limit: int) -> list
 
 def put_realized_metric(source_id: str, tick: int, metric_key: str, *,
                         value: float | None, coverage: float | None, status: str,
-                        reason: str | None = None) -> None:
-    """Upsert one realized-metric row; a final row (realized, evicted) is never changed.
+                        reason: str | None = None, final: bool | None = None) -> None:
+    """Upsert one realized-metric row; a final row is never changed.
 
-    The backfill may revisit a tick on every cycle until labels land, so non-final
-    statuses (no_labels, pending, insufficient_coverage, single_class, error) are
-    replaced in place.  Once a tick is realized, a later eviction by the producer must
-    not erase the measured value; once evicted, nothing can be measured any more.
+    `final` defaults to `status in REALIZED_FINAL_STATUSES` (realized, evicted).  The
+    backfill passes `final=True` for a `no_labels` row whose labels are overdue (spec
+    B.2: `available_at_tick` ≤ current tick and still no labels), so the tick is not
+    pulled again.  Non-final statuses (pending, insufficient_coverage, single_class,
+    error, and no_labels before the due tick) are replaced in place on every revisit.
+    Once a tick is realized, a later eviction by the producer must not erase the
+    measured value; once evicted, nothing can be measured any more.
     """
+    is_final = bool(final) if final is not None else status in REALIZED_FINAL_STATUSES
     row = {
         "source_id": source_id, "tick": int(tick), "metric_key": metric_key,
         "value": None if value is None else float(value),
         "coverage": None if coverage is None else float(coverage),
-        "status": status, "reason": reason, "computed_at": time.time(),
+        "status": status, "reason": reason, "computed_at": time.time(), "final": is_final,
     }
     where = ((live_realized_metrics.c.source_id == source_id)
              & (live_realized_metrics.c.tick == int(tick))
              & (live_realized_metrics.c.metric_key == metric_key))
     with engine().begin() as cx:
-        existing = cx.execute(select(live_realized_metrics.c.status).where(where)).fetchone()
+        existing = cx.execute(select(live_realized_metrics.c.final).where(where)).fetchone()
         if existing is None:
             try:
                 with cx.begin_nested():
@@ -653,12 +676,12 @@ def put_realized_metric(source_id: str, tick: int, metric_key: str, *,
                 return
             except IntegrityError:  # another lease holder won after our SELECT
                 existing = cx.execute(
-                    select(live_realized_metrics.c.status).where(where)).one()
-        if existing[0] in REALIZED_FINAL_STATUSES:
+                    select(live_realized_metrics.c.final).where(where)).one()
+        if existing[0]:
             return
         cx.execute(update(live_realized_metrics).where(where).values(
             value=row["value"], coverage=row["coverage"], status=status,
-            reason=reason, computed_at=row["computed_at"]))
+            reason=reason, computed_at=row["computed_at"], final=is_final))
 
 
 def get_realized_metric(source_id: str, tick: int, metric_key: str) -> dict | None:
@@ -696,7 +719,7 @@ def realized_history(source_id: str, metric_key: str, limit: int) -> list[dict]:
 
 
 def ticks_needing_realization(source_id: str, metric_key: str, low: int, high: int) -> list[int]:
-    """Observed ticks in [low, high) whose realized row is absent or not yet final."""
+    """Observed ticks in [low, high) whose realized row is absent or not yet `final`."""
     if high <= low:
         return []
     with engine().begin() as cx:
@@ -709,9 +732,25 @@ def ticks_needing_realization(source_id: str, metric_key: str, low: int, high: i
             & (live_realized_metrics.c.metric_key == metric_key)
             & (live_realized_metrics.c.tick >= int(low))
             & (live_realized_metrics.c.tick < int(high))
-            & (live_realized_metrics.c.status.in_(sorted(REALIZED_FINAL_STATUSES))))
-        ).scalars().all()
+            & (live_realized_metrics.c.final.is_(True)))).scalars().all()
     return sorted(int(t) for t in set(observed) - set(final))
+
+
+def pending_ticks_below(source_id: str, metric_key: str, below: int) -> list[int]:
+    """Ticks under `below` whose row is still `pending` (labels never confirmed).
+
+    Normally empty: a tick is finalized while it is inside the backfill window.  A
+    producer outage spanning the whole window leaves `pending` rows behind, and the
+    backfill sweeps them once more so they end `realized` or final `no_labels`.
+    """
+    with engine().begin() as cx:
+        rows = cx.execute(select(live_realized_metrics.c.tick).where(
+            (live_realized_metrics.c.source_id == source_id)
+            & (live_realized_metrics.c.metric_key == metric_key)
+            & (live_realized_metrics.c.tick < int(below))
+            & (live_realized_metrics.c.status == "pending")
+            & (live_realized_metrics.c.final.is_(False)))).scalars().all()
+    return sorted(int(t) for t in rows)
 
 
 def set_live_ack(observation_id: str, *, ok: bool, error: str | None = None) -> None:

@@ -3,7 +3,11 @@
 Contract §7: labels (ML) and rewards (NBA) arrive `label_lag_ticks` / `reward_lag_ticks`
 after a window closes.  The live tick can therefore only record *pending* for the window
 it observes; this module revisits the ticks in `[t - L - 1, t)` on every poll cycle and
-writes the outcome to `live_realized_metrics`.  It never touches `live_observations`:
+writes the outcome to `live_realized_metrics`.  A tick is *done* (`final`) once it is
+`realized`, `evicted`, or the producer's `available_at_tick` has passed with no labels
+(final `no_labels`, spec B.2); `pending` rows that slipped below the window during a
+producer outage are swept once more so no tick is left `pending` forever.  It never
+touches `live_observations`:
 the stored payload and digest stay byte-identical, and the realized value is used by
 `realized_view.apply_realized` when the use case is graded.
 
@@ -41,7 +45,7 @@ def status_from_reason(reason: str | None) -> str:
     if reason.startswith("single class"):
         return "single_class"
     if reason.startswith("labels pull failed"):
-        return "error"
+        return "pending"        # transient: the backfill asks for the labels again
     return "no_labels"          # empty window, insufficient sample, no matched rewards
 
 
@@ -70,23 +74,30 @@ def record_current_tick(source_id: str, tick: int, payload: dict,
 
 def run(source_id: str, adapter, *, current_tick: int, lag: int,
         metric_keys: tuple[str, ...]) -> list[dict]:
-    """Realize every non-final tick in `[current_tick - lag - 1, current_tick)`.
+    """Realize every non-final tick in `[current_tick - lag - 1, current_tick)`, plus any
+    older tick still `pending`.
 
-    Returns the rows written as `{"tick", "metric_key", "status"}`.  A 404 marks the
-    tick `evicted` (final — the producer will never serve it again); a digest mismatch
-    marks it `error` (retried, surfaced); any other failure is logged and stops this
-    cycle's backfill so a flapping producer is not hammered.  Nothing here ever holds
-    the source cursor.
+    Returns the rows written as `{"tick", "metric_key", "status"}`.  A 404 on the
+    inference window marks the tick `evicted` (final — the producer will never serve it
+    again); a digest mismatch marks it `error` (retried, surfaced); labels missing at or
+    after their due tick mark it final `no_labels`; any other failure is logged and stops
+    this cycle's backfill so a flapping producer is not hammered.  Nothing here ever
+    holds the source cursor.
     """
     low, high = max(0, current_tick - lag - 1), current_tick
-    pending = sorted({t for key in metric_keys
-                      for t in db.ticks_needing_realization(source_id, key, low, high)})
+    in_window = {t for key in metric_keys
+                 for t in db.ticks_needing_realization(source_id, key, low, high)}
+    # Ticks that left the window still `pending` (the producer was unreachable for the
+    # whole window): one more visit ends them realized or final no_labels.
+    stragglers = {t for key in metric_keys
+                  for t in db.pending_ticks_below(source_id, key, low)}
     written: list[dict] = []
-    for t in pending:
+    for t in sorted(in_window | stragglers):
         obs = db.get_live_observation_by_tick(source_id, t)
         expected = obs["content_sha256"] if obs else None
         try:
-            results = adapter.realize_tick(t, expected)
+            results = adapter.realize_tick(t, expected, current_tick=current_tick,
+                                           due_tick=t + lag)
         except WindowEvicted as exc:
             for key in metric_keys:
                 db.put_realized_metric(source_id, t, key, value=None, coverage=None,
@@ -107,6 +118,7 @@ def run(source_id: str, adapter, *, current_tick: int, lag: int,
             if key not in metric_keys:
                 continue
             db.put_realized_metric(source_id, t, key, value=r.value, coverage=r.coverage,
-                                   status=r.status, reason=r.reason)
+                                   status=r.status, reason=r.reason,
+                                   final=True if r.final else None)
             written.append({"tick": t, "metric_key": key, "status": r.status})
     return written

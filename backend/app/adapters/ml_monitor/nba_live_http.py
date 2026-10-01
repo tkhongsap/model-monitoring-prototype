@@ -71,7 +71,8 @@ class LiveHttpNBAAdapter(LiveHttpMLAdapter):
         acceptance = RealizedResult(
             float(np.mean(joined.matched)) if covered else None, joined.coverage,
             "realized" if covered else joined.status, list(joined.matched),
-            None if covered else joined.reason)
+            None if covered else joined.reason,
+            final=False if covered else joined.final)   # overdue no_labels is final for both
         return {"realized_roc_auc": joined, "acceptance_rate": acceptance}
 
     def _extend(self, res: LaneResult, inf: list, matched: list,

@@ -118,7 +118,7 @@ def _commit_tick(runner, payload: dict, telemetry_err: str | None, meta: dict) -
     if realized_keys:
         try:
             label_backfill.record_current_tick(
-                runner.use_case_id, runner._read_tick - 1, payload, realized_keys)
+                runner.use_case_id, payload["observed_tick"], payload, realized_keys)
         except Exception as exc:  # noqa: BLE001 — never undo a committed observation
             db.mark_live_warning(runner.use_case_id, f"realized row: {exc}")
 
