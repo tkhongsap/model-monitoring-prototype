@@ -70,7 +70,15 @@ telemetry contract; `backend/app/db.py` for the schema (ordered in-code migratio
 Trust boundaries: the browser is read-only and never advances cursors. Mutating routes
 are limited to the worker-token `POST /api/live/poll`. Telemetry pulls and
 acknowledgements use `LIVE_TELEMETRY_TOKEN`; the SPA bundle is checked for leaked
-demo identifiers and secret names (`scripts/check-strict-live-bundle.mjs`).
+demo identifiers and secret names (`scripts/check-strict-live-bundle.mjs`, including
+`LIVE_ALERT_WEBHOOK_URL`). The only other outbound call is the alert webhook POST.
+
+Alerting: after each poll cycle the graded health of every use case (including lagged
+realized metrics) is diffed against its last snapshot; `* → Red` and `Green → Amber`
+open an alert in `live_alerts`, a return to Green resolves it, Unknown never alerts.
+Alerts are listed by `GET /api/live/alerts` and shown on the dashboard; when
+`LIVE_ALERT_WEBHOOK_URL` is set each open and resolve is POSTed once (Slack-compatible
+body). Triage ownership: [docs/adr/0001-alert-ownership.md](docs/adr/0001-alert-ownership.md).
 
 Models: churn classifier (`AICT-L01`, ML lane), support chatbot (`AICT-L02`, LLM lane
 judged by `claude-haiku-4-5`), NBA recommender (`AICT-L03`, ML + feedback lanes).
@@ -102,9 +110,15 @@ Layout: `backend/app/engines/` are pure functions, `backend/app/adapters/` do I/
   reinstalls dependencies. Replit-specific notes are in [replit.md](replit.md).
 - Running identity: `GET /api/version` reports `build_sha` (the deployed Git commit),
   `contract_version`, and the producer gateway SHA.
-- Monitoring: `GET /api/readiness` (database, poller, judge, configuration) and
-  `GET /api/live/sync` (per-source cursor state). `.github/workflows/autoscale-poll.yml`
-  wakes the Autoscale deployment every five minutes with the worker token.
+- Monitoring: `GET /api/readiness` (database, poller, judge, configuration),
+  `GET /api/live/sync` (per-source cursor state) and `GET /api/live/alerts?open=true`
+  (open health-transition alerts with their delivery status).
+  `.github/workflows/autoscale-poll.yml` wakes the Autoscale deployment every five
+  minutes with the worker token.
+- Optional environment: `LIVE_ALERT_WEBHOOK_URL` (Slack incoming webhook or any JSON
+  receiver; a secret — never logged beyond its host, never in the bundle) and
+  `LIVE_DASHBOARD_URL` (public SPA origin linked from each notification). Without the
+  webhook, alerts are still recorded and shown; delivery is marked `skipped`.
 - Runbook and rollback: redeploy the previous Replit revision; migrations are additive.
   Demo runbook: [docs/LIVE-DEMO.md](docs/LIVE-DEMO.md).
 - Incident path: none yet (pilot); see [DEVLOG.md](DEVLOG.md) Known gaps.
@@ -121,7 +135,8 @@ Layout: `backend/app/engines/` are pure functions, `backend/app/adapters/` do I/
 - Strict-live deployment and configuration: [docs/STRICT-LIVE.md](docs/STRICT-LIVE.md)
 - Local demo and onboarding a fourth model: [docs/LIVE-DEMO.md](docs/LIVE-DEMO.md)
 - Replit deployment notes and secrets list: [replit.md](replit.md)
-- ADRs: none yet; the first (alert ownership) arrives with the alerting slice.
+- Architecture decision records: [docs/adr/](docs/adr/README.md) — current:
+  [0001 alert ownership](docs/adr/0001-alert-ownership.md)
 
 ## Known limitations
 
@@ -130,10 +145,11 @@ Layout: `backend/app/engines/` are pure functions, `backend/app/adapters/` do I/
   latest realized tick (shown as `as_of_tick`), not on the tick being observed. A window
   below 500 records is never realized, and a window the producer evicts (404) before its
   labels arrive stays `evicted`.
-- No alerting exists in the live plane: Red/Amber transitions are visible on the board
-  only; the detail payload returns `actions: []`.
+- Alerts are advisory and read-only: no acknowledge workflow, SLA timer, paging or
+  escalation; one webhook channel, one delivery attempt per poll cycle (a failed POST is
+  retried next cycle, never lost). Triage belongs to the RAI team (ADR 0001).
 - Producer HTTP calls have no retry or backoff; a stuck cursor has no operator endpoint.
 - LIME per-instance explanations are off in production; the sampling policy is uniform
-  (contract §14); alerts, when added, are advisory only.
+  (contract §14).
 - `pnpm run build:live` cannot run on macOS because non-Linux native binaries are
   excluded from the lockfile; CI on Linux is the proof.

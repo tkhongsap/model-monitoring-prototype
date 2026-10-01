@@ -36,14 +36,53 @@ depend on. The spec is
 ## Current plan
 
 1. Slice A — playbook baseline and `postMerge` fix: merged (#9).
-2. Slice B — monitoring correctness (`count=0` observation, label-lag backfill): in
-   progress (this branch, `fix/count-zero-and-label-backfill`).
-3. Slice C — alerting (transition state machine, API, webhook, UI, ADR 0001): not started.
+2. Slice B — monitoring correctness (`count=0` observation, label-lag backfill): merged
+   (#10).
+3. Slice C — alerting (transition state machine, API, webhook, UI, ADR 0001): in
+   progress (this branch, `feat/live-alerting`).
 4. Slice D — operational resilience (HTTP retry, structured logging, operator skip, NBA
    baseline persistence): not started.
 5. Slice E — repository hygiene and contract strictness: not started.
 
 ## Work log
+
+### 2026-10-01 — live alerting: state machine, webhook, API, UI (slice C)
+
+- Changed: new pure engine `backend/app/engines/alerts.py` (`transitions(prev, curr,
+  open_keys)`: opens on `* → Red` and `Green → Amber`, resolves on Green, dedupes on
+  `(lane, to_health)` while open, ignores Unknown both ways). New tables `live_alerts`
+  and `live_health_snapshots` (migration 6) with `open_alert`, `resolve_alerts`,
+  `list_alerts`, `open_alert_keys`, `alerts_pending_delivery`, `mark_alert_delivery`.
+  New `backend/app/alerting.py` evaluates each use case after its tick inside the
+  lease-held cycle, on the grading view (`apply_realized`) so a realized-AUC Red alerts.
+  New `backend/app/alert_delivery.py` POSTs a Slack-compatible body to
+  `LIVE_ALERT_WEBHOOK_URL` on open and resolve, records failures per phase and retries
+  next cycle (one attempt per cycle until slice D), logs the host only; a missing webhook
+  marks the phase `skipped`. `GET /api/live/alerts` on both routers; detail `alerts`
+  replaces `actions`; portfolio `open_alerts`. Frontend `components/alerts.tsx`
+  (`AlertsStrip`, `AlertsPanel`), `LiveAlert` type; bundle guard gains
+  `LIVE_ALERT_WEBHOOK_URL`. `docs/adr/0001-alert-ownership.md` and the ADR index.
+- Evidence: from `backend/`, `.venv/bin/python -m pytest -q -m "not slow"` → 112 passed,
+  9 deselected (86 before this slice). New tests: `test_alert_engine.py`,
+  `test_alerting.py` (including a poll cycle that survives a webhook outage),
+  `test_alert_delivery.py` (500 → connection error → 200 delivers exactly once; logs
+  carry the host, never the URL path or body), `test_alert_routes.py` (strict router
+  behind the real middleware: listing, `uc`/`open`/`limit` filters, POST → 404, columns
+  only; detail and portfolio fields). From the repo root `pnpm run typecheck` → Done for
+  every package. `pnpm run build:live` and `pnpm run check:strict-live` are unavailable
+  on this macOS host (lockfile drops `@rollup/rollup-darwin-arm64`; the build fails with
+  that exact error); the strict-live frontend workflow is the proof. Unavailable: real
+  producer, Langfuse, live Claude judge, a real webhook receiver.
+- Learned: `app.main` chooses its router when first imported, and
+  `test_strict_live_mode.py` imports it at collection time in demo mode, so a full run
+  never mounts the strict router on `main.app`; a strict-router test must assemble
+  `live_routes.router` plus `main.strict_live_route_isolation` itself. The plan's
+  "Unknown in either position never opens" conflicts with the spec's `* → Red`; the
+  spec wins (Unknown → Red opens, dedupe still prevents the Red → Unknown → Red
+  duplicate), because a lane that was never measured and now reads Red is the alert
+  the monitor exists to raise.
+- Remaining: slices D and E below; retry with backoff for webhook delivery arrives with
+  D1.
 
 ### 2026-10-01 — count=0 windows and label-lag realized metrics (slice B)
 
@@ -117,12 +156,10 @@ depend on. The spec is
 
 ## Known gaps
 
-- No alert on Red: `backend/app/api/live_portfolio.py` hard-codes `actions: []`; no
-  transition detection, persistence or delivery. Impact: operators must watch the board.
-  Trigger: slice C.
 - No HTTP retry or backoff (contract §12): `backend/app/adapters/telemetry_http.py` uses
   a single `httpx.get`; 429/503 and connection errors hold the cursor until the next
-  cycle. Impact: transient producer errors look like outages. Trigger: slice D.
+  cycle. Impact: transient producer errors look like outages. Webhook delivery likewise
+  makes one attempt per poll cycle. Trigger: slice D.
 - No operator path for a held cursor: `db.clear_live_state` is not routed; a poisoned
   window needs a database session. Trigger: slice D.
 - Poller observability is `print`; readiness does not expose cycle duration or outcome.
@@ -137,8 +174,10 @@ depend on. The spec is
   defaults to 0.0 when absent, producer URLs may be `http://` in strict live mode, and the
   judge-model docstring in `backend/app/adapters/llm_eval/live_http.py` is wrong.
   Trigger: slice E.
-- Alert triage ownership (contract §18 Q1) is open; resolved for this repository by
-  ADR 0001 in slice C, contract-level question stays with the contract owners.
+- Alert triage ownership (contract §18 Q1) is open at the contract level; resolved for
+  this repository by [docs/adr/0001-alert-ownership.md](docs/adr/0001-alert-ownership.md)
+  (RAI team via the webhook channel; producers are not paged). Alerts have no
+  acknowledge workflow, SLA timer or escalation.
 - Out of scope and unscheduled: per-use-case thresholds, LIME in production, §14 sampling
   policy, Alembic, Prometheus metrics, Slack SDK, paging/escalation, push ingest,
   skops/ONNX artifacts, retention pruning.

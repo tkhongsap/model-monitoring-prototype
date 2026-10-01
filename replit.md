@@ -33,5 +33,13 @@ The root `.replit` publishes an Autoscale deployment. `scripts/deploy-run.sh` al
 - `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_HOST`
 - `LIVE_POLL_SECONDS` — positive warm-instance polling interval
 
+Optional secrets:
+
+- `LIVE_ALERT_WEBHOOK_URL` — Slack incoming webhook (or any JSON receiver) that gets one
+  POST per opened and resolved alert; treat as a credential. Unset: alerts are recorded
+  and shown but not delivered.
+- `LIVE_DASHBOARD_URL` — public origin of the deployed dashboard, linked from each
+  alert notification.
+
 `.env` files are excluded from Replit deployment images. Use Replit Secrets for runtime
 credentials. `ALLOW_INSECURE_LIVE_TESTING` must remain unset in production.

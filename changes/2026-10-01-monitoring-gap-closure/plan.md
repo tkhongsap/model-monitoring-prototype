@@ -791,3 +791,33 @@ Per-use-case thresholds; LIME in production; §14 sampling policy; Alembic; Prom
   values live only in `live_realized_metrics` (sparklines from `db.realized_history`),
   and the flagged-concern row says so. `rollup_meta` stays in the detail payload's
   pass-through keys (lane names and signal keys only; no raw data).
+- C1: the plan's rule "`Unknown` in either position never opens" was narrowed to the
+  spec's `* → Red`: a previous Unknown (or no snapshot) followed by Red opens an alert,
+  because an unmeasured lane that now reads Red is exactly the alert worth raising; a
+  current Unknown still never opens or resolves, and the open-key dedupe still makes
+  Red → Unknown → Red a single alert (`test_unknown_gap_does_not_reopen`). A first-ever
+  Amber (no snapshot) does not open. Resolve events carry the previous health as
+  `from_health` and `"Green"` as `to_health`.
+- C2: the alerts tables are migration 6 (slice B already used 4 and 5); the two tests
+  that pin the migration list (`test_live_release_hardening.py`,
+  `test_realized_store.py`) now read `[1, 2, 3, 4, 5, 6]`. `clear_live_state` also
+  clears `live_alerts` and `live_health_snapshots`. A `mark_alerts_delivery_skipped`
+  helper was added so a missing webhook marks pending phases `skipped` (not retried
+  forever). `alerting.evaluate` runs inside the per-source `try` after `tick()` and the
+  poller calls `alert_delivery.deliver_pending()` after the source loop under its own
+  `try`, so a webhook outage can never fail a cycle or hold a source.
+- C3: `build_payload` also emits Slack `blocks` (section text plus a context link when
+  `LIVE_DASHBOARD_URL` is set); the `alert` object carries `use_case_id` (the
+  `source_id`), `phase`, `observation_id`, `opened_at`, `resolved_at`, `resolved_tick`
+  and `dashboard_url` in addition to lane/health/tick. The resolve text reads
+  `[RESOLVED] <uc> <lane>: <to_health> → Green at tick <resolved_tick>`.
+- C4: `GET /live/alerts` is also registered on the dev router (`routes.py`) so the Vite
+  dashboard works in demo mode; the strict-router test builds `live_routes.router` plus
+  `main.strict_live_route_isolation` into its own FastAPI app, because `app.main`
+  mounts whichever router matched the mode at first import (demo, in a full run). The
+  response carries `"redacted": true` like `/live/observations`. The use-case panel
+  fetches `/api/live/alerts?uc=` itself (open plus the last 20 resolved) rather than
+  reading only the detail payload's open `alerts`. `pnpm run build:live` and
+  `pnpm run check:strict-live` were attempted on this macOS host and fail on the missing
+  `@rollup/rollup-darwin-arm64` (the documented limitation); only `pnpm run typecheck`
+  ran locally.

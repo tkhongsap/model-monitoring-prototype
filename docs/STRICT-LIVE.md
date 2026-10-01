@@ -69,6 +69,33 @@ portfolio grade `realized_roc_auc` and `acceptance_rate` on the most recent `rea
 tick, reported as `as_of_tick`; with no realized row the lane stays reasoned-Unknown with
 its pending reason.
 
+## Alerting
+
+After each runner tick in the lease-held cycle, the poller grades the use case the way
+the dashboard does (latest observation plus the newest realized metric) and diffs the
+per-lane and overall health against the previous snapshot in `live_health_snapshots`.
+`* → Red` and `Green → Amber` open a row in `live_alerts`; a lane that returns to Green
+resolves every open alert on it; Unknown (stale source, pending labels, uninstrumented
+lane) never opens or resolves anything, and an open `(lane, health)` is never duplicated,
+so Red → Unknown → Red is one alert. Both tables are migration 6 and hold derived
+metadata only.
+
+`GET /api/live/alerts?uc=&open=true&limit=` lists alerts newest first with their
+delivery status; the use-case detail carries its open alerts as `alerts` and the
+portfolio summary counts `open_alerts` by severity. The SPA shows an alerts strip on the
+home page and a panel on each use-case page; both are read-only.
+
+Set `LIVE_ALERT_WEBHOOK_URL` (a secret: it is the credential) to deliver each opened and
+resolved alert as one POST with a Slack-incoming-webhook-compatible body
+`{"text", "blocks", "alert"}` carrying use case id, lane, from/to health, tick and, when
+`LIVE_DASHBOARD_URL` is set, a link to the use-case page. No features and no trace text
+are sent. Delivery is at-least-once: a non-2xx or connection error is recorded on the
+alert (`open_delivery_error` / `resolve_delivery_error`) and retried on the next cycle,
+one attempt per cycle until the retry policy of the resilience slice lands; it never
+blocks grading or holds a cursor. Logs name the webhook host only. Without a webhook the
+phase is marked `skipped` and the alert remains visible in the API and UI. Triage
+ownership is recorded in [adr/0001-alert-ownership.md](adr/0001-alert-ownership.md).
+
 Sync states are `connecting`, `catching_up`, `at_tail`, `idle`, `stale`, and `error`.
 Inspect them through `GET /api/live/sync`, the live portfolio response, or a use-case
 detail response. Live observation evidence is under `/api/live/observations` and live

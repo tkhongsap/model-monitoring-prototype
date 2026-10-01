@@ -1,14 +1,32 @@
 # Changelog
 
 Notable user- and operator-visible changes are recorded here. Development notes
-and evidence belong in [DEVLOG.md](DEVLOG.md); decision rationale belongs in ADRs
-(none yet; the first arrives with the alerting slice).
+and evidence belong in [DEVLOG.md](DEVLOG.md); decision rationale belongs in ADRs under
+[docs/adr/](docs/adr/README.md).
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
 ### Added
+
+- Live alerting (spec C). After every poll cycle each use case's graded health
+  (including lagged realized metrics) is diffed against its last snapshot: `* → Red` and
+  `Green → Amber` open an alert, a return to Green resolves it, Unknown never alerts, and
+  an open `(lane, health)` is never duplicated. Alerts live in the new `live_alerts`
+  table (migration 6, with `live_health_snapshots`).
+- `GET /api/live/alerts?uc=&open=&limit=` on the strict router (read-only, derived
+  columns only); the live use-case detail carries `alerts` (its open alerts) instead of
+  the demo-era `actions: []`; the portfolio summary reports `open_alerts` by severity.
+- Webhook delivery: when `LIVE_ALERT_WEBHOOK_URL` is set, each opened and resolved alert
+  is POSTed once as a Slack-incoming-webhook-compatible `{text, blocks, alert}` body
+  (use case, lane, health, tick, dashboard link from `LIVE_DASHBOARD_URL`; no features,
+  no trace text). A failed POST is recorded on the alert and retried next cycle; logs name
+  the webhook host only. The strict-live bundle check rejects the secret name.
+- Dashboard: an "Alerts" strip on the home page (open Red/Amber counts, newest five) and
+  an "Alerts" panel on each use-case page (open and the last 20 resolved). Read-only.
+- `docs/adr/0001-alert-ownership.md`: the RAI team owns alert triage via the webhook
+  channel; producers are not paged.
 
 - Playbook baseline documents: `README.md`, `CLAUDE.md`, `AGENTS.md`, `CHANGELOG.md`,
   `DEVLOG.md`, `TESTING.md`.
