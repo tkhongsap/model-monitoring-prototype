@@ -394,7 +394,7 @@ class LiveNBARunner:
         self.seed = seed if seed is not None else config.DEMO_SEED
         self.base_url = (nba_url or config.LIVE_NBA_URL).rstrip("/")
         writer = _artifact_writer_factory(f"LIVE-{LIVE_NBA_UC}")   # see LiveRunner note
-        self.ml = LiveHttpNBAAdapter(self.base_url, writer)
+        self.ml = LiveHttpNBAAdapter(self.base_url, writer, source_id=LIVE_NBA_UC)
         self.explain = LiveHttpExplainAdapter(
             base_url=self.base_url, artifact_writer=writer, model_name="nba-recommender",
             seed=self.seed, class_names=["decline", "accept"],

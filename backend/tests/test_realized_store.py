@@ -92,7 +92,7 @@ def test_migrations_four_and_five_are_recorded(isolated_db):
     bind = db.engine()
     with bind.begin() as cx:
         versions = list(cx.execute(db.select(db.schema_migrations.c.version)).scalars())
-    assert versions == [1, 2, 3, 4, 5, 6]  # 6: live alerts (slice C)
+    assert versions == [1, 2, 3, 4, 5, 6, 7]  # 6: live alerts (C); 7: baselines (D)
 
 
 def test_final_flag_defaults_from_status_and_can_be_forced(isolated_db):

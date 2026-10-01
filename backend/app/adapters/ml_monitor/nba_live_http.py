@@ -15,14 +15,21 @@ realized AUC on the partial matched subset), different telemetry shape — the a
     after a version change must not anchor the new policy's baseline to the OLD
     policy's mix (review finding). Until a version-matched window is seen the signal is
     None with errors["recommendation_drift_pending"], excluded from rollup with reason.
+    The captured mix is persisted in `live_baselines` per (source, model version) and
+    read back on a cold start, so an Autoscale restart does not reset the signal to
+    pending (spec D.4). The database is the only state the adapter shares; a failure
+    there degrades to the in-memory baseline and never fails the tick.
 
 No churn fallbacks here: feature order/categoricals come from the artifact meta or
 sorted record keys only (the NBA service owns its feature list, contract v1.0).
 """
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 
+from ... import db
 from ..base import LaneResult
 from .live_http import LiveHttpMLAdapter
 from .realized import MIN_COVERAGE, RealizedResult
@@ -32,6 +39,11 @@ def _tv_distance(p: dict, q: dict) -> float:
     """Total-variation distance between two offer-mix distributions (0.5 * L1)."""
     keys = set(p) | set(q)
     return 0.5 * sum(abs(float(p.get(k, 0.0)) - float(q.get(k, 0.0))) for k in keys)
+
+
+log = logging.getLogger(__name__)
+
+BASELINE_KIND = "offer_mix"
 
 
 class LiveHttpNBAAdapter(LiveHttpMLAdapter):
@@ -44,16 +56,43 @@ class LiveHttpNBAAdapter(LiveHttpMLAdapter):
                     "acceptance_rate", "recommendation_drift")
 
     def __init__(self, base_url: str, artifact_writer, chunk_size: int = 500,
-                 model_name: str = "nba-recommender") -> None:
+                 model_name: str = "nba-recommender", source_id: str = "AICT-L03") -> None:
         super().__init__(base_url, artifact_writer, chunk_size=chunk_size,
                          model_name=model_name,
                          inferences_path="/telemetry/recommendations",
                          labels_path="/telemetry/rewards",
                          proba_field="accept_proba", id_field="rec_id")
+        self.source_id = source_id
         self._baseline_mix: dict | None = None
+        self._baseline_loaded_for: int | None = None   # version whose row was looked up
 
     def _on_rebaseline(self) -> None:
-        self._baseline_mix = None   # re-capture from the first window of the new model
+        # the new model's baseline: the stored one if this version was seen before a
+        # restart, otherwise re-captured from its first window
+        self._baseline_mix = None
+        self._baseline_loaded_for = None
+        self._load_baseline()
+
+    def _load_baseline(self) -> None:
+        """Cold-start read of the persisted mix for the current model version (once)."""
+        if self._version is None or self._baseline_loaded_for == self._version:
+            return
+        self._baseline_loaded_for = self._version
+        try:
+            row = db.get_baseline(self.source_id, BASELINE_KIND, self._version)
+        except Exception as exc:  # noqa: BLE001 — degrade to in-memory capture
+            log.warning("%s: baseline read failed: %s: %s", self.source_id,
+                        type(exc).__name__, exc)
+            return
+        if row and isinstance(row.get("payload"), dict):
+            self._baseline_mix = dict(row["payload"])
+
+    def _store_baseline(self, mix: dict) -> None:
+        try:
+            db.put_baseline(self.source_id, BASELINE_KIND, self._version, mix)
+        except Exception as exc:  # noqa: BLE001 — the tick still grades on the in-memory mix
+            log.warning("%s: baseline write failed: %s: %s", self.source_id,
+                        type(exc).__name__, exc)
 
     def _on_empty_window(self, res: LaneResult, t: int) -> None:
         # No recommendations were served: the Feedback lane and the mix drift are
@@ -89,11 +128,14 @@ class LiveHttpNBAAdapter(LiveHttpMLAdapter):
         window_version = inf[0].get("served_version") if inf else None
         if mix:
             if self._baseline_mix is None:
+                self._load_baseline()        # a restart may have lost only the memory
+            if self._baseline_mix is None:
                 # capture ONLY from a window served by the CURRENT model version — a
                 # lagging monitor replaying pre-retrain windows must not anchor the new
                 # policy's baseline to the old policy's mix (review finding)
                 if window_version == self._version:
                     self._baseline_mix = dict(mix)
+                    self._store_baseline(self._baseline_mix)
             if self._baseline_mix is not None:
                 res.signals["recommendation_drift"] = _tv_distance(mix, self._baseline_mix)
             else:

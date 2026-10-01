@@ -226,6 +226,19 @@ live_alerts = Table(
 
 ALERT_DELIVERY_RETRY_STATUSES = frozenset({"pending", "error"})
 
+# Adapter baselines that must survive an Autoscale restart (spec D.4).  One JSON payload
+# per (source, kind, model_version); today the only kind is the NBA `offer_mix` that
+# `recommendation_drift` is measured against.  Derived aggregates only — no raw records.
+live_baselines = Table(
+    "live_baselines", metadata,
+    Column("source_id", String, nullable=False),
+    Column("kind", String, nullable=False),
+    Column("model_version", String, nullable=False),
+    Column("payload", Text, nullable=False),
+    Column("captured_at", Float, nullable=False),
+    UniqueConstraint("source_id", "kind", "model_version", name="uq_live_baseline"),
+)
+
 live_worker_leases = Table(
     "live_worker_leases", metadata,
     Column("lease_name", String, primary_key=True),
@@ -268,6 +281,8 @@ def migrate_engine(bind) -> list[int]:
         (5, "realized-metric finality flag", add_realized_final),
         (6, "live alerts and health snapshots", lambda cx: metadata.create_all(
             bind=cx, tables=[live_health_snapshots, live_alerts], checkfirst=True)),
+        (7, "persisted adapter baselines",
+         lambda cx: live_baselines.create(bind=cx, checkfirst=True)),
     ]
     applied_now: list[int] = []
     # The local lock also makes SQLite thread-contention tests deterministic. Managed
@@ -953,6 +968,43 @@ def mark_alerts_delivery_skipped(alert_ids: list[str], reason: str) -> None:
                 resolve_delivery_status="skipped", resolve_delivery_error=reason))
 
 
+# ------------------------------------------------------------------- baselines
+
+def _baseline_where(source_id: str, kind: str, model_version):
+    return ((live_baselines.c.source_id == source_id)
+            & (live_baselines.c.kind == kind)
+            & (live_baselines.c.model_version == str(model_version)))
+
+
+def put_baseline(source_id: str, kind: str, model_version, payload: dict) -> None:
+    """Upsert the baseline for one (source, kind, model version)."""
+    row = {"source_id": source_id, "kind": kind, "model_version": str(model_version),
+           "payload": json.dumps(payload, sort_keys=True), "captured_at": time.time()}
+    where = _baseline_where(source_id, kind, model_version)
+    with engine().begin() as cx:
+        updated = cx.execute(update(live_baselines).where(where).values(
+            payload=row["payload"], captured_at=row["captured_at"]))
+        if updated.rowcount:
+            return
+        try:
+            with cx.begin_nested():
+                cx.execute(insert(live_baselines), row)
+        except IntegrityError:  # another lease holder captured first: keep theirs
+            pass
+
+
+def get_baseline(source_id: str, kind: str, model_version) -> dict | None:
+    """`{"payload", "captured_at", ...}` for one baseline, or None when never captured."""
+    with engine().begin() as cx:
+        row = cx.execute(select(live_baselines).where(
+            _baseline_where(source_id, kind, model_version))).mappings().fetchone()
+    if not row:
+        return None
+    out = dict(row)
+    out["payload"] = json.loads(out["payload"])
+    return out
+
+
 def set_live_ack(observation_id: str, *, ok: bool, error: str | None = None) -> None:
     with engine().begin() as cx:
         cx.execute(update(live_observations).where(
@@ -1002,6 +1054,7 @@ def clear_live_state(source_id: str | None = None) -> None:
             cx.execute(delete(live_alerts).where(live_alerts.c.source_id == source_id))
             cx.execute(delete(live_health_snapshots).where(
                 live_health_snapshots.c.source_id == source_id))
+            cx.execute(delete(live_baselines).where(live_baselines.c.source_id == source_id))
             cx.execute(delete(live_source_cursors).where(live_source_cursors.c.source_id == source_id))
         else:
             cx.execute(delete(live_signal_history))
@@ -1009,6 +1062,7 @@ def clear_live_state(source_id: str | None = None) -> None:
             cx.execute(delete(live_realized_metrics))
             cx.execute(delete(live_alerts))
             cx.execute(delete(live_health_snapshots))
+            cx.execute(delete(live_baselines))
             cx.execute(delete(live_source_cursors))
 
 
