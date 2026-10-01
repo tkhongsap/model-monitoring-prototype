@@ -163,6 +163,25 @@ live_signal_history = Table(
     UniqueConstraint("observation_id", "signal_key", name="uq_live_signal_observation"),
 )
 
+# Label-lag realized metrics (contract §7).  Labels for a window arrive ticks after the
+# window closed, so realized values live here and in live_signal_history — never by
+# rewriting the immutable observation payload.  One row per (source, tick, metric); a
+# row whose status is final (realized, evicted) is never overwritten.
+live_realized_metrics = Table(
+    "live_realized_metrics", metadata,
+    Column("source_id", String, nullable=False),
+    Column("tick", Integer, nullable=False),
+    Column("metric_key", String, nullable=False),
+    Column("value", Float),
+    Column("coverage", Float),
+    Column("status", String, nullable=False),
+    Column("reason", Text),
+    Column("computed_at", Float, nullable=False),
+    UniqueConstraint("source_id", "tick", "metric_key", name="uq_live_realized_metric"),
+)
+
+REALIZED_FINAL_STATUSES = frozenset({"realized", "evicted"})
+
 live_worker_leases = Table(
     "live_worker_leases", metadata,
     Column("lease_name", String, primary_key=True),
@@ -190,6 +209,8 @@ def migrate_engine(bind) -> list[int]:
         (2, "durable live artifact blobs",
          lambda cx: live_artifact_blobs.create(bind=cx, checkfirst=True)),
         (3, "scheduled POC batch correlation", add_live_batch_id),
+        (4, "label-lag realized metrics",
+         lambda cx: live_realized_metrics.create(bind=cx, checkfirst=True)),
     ]
     applied_now: list[int] = []
     # The local lock also makes SQLite thread-contention tests deterministic. Managed
@@ -553,6 +574,21 @@ def get_latest_live_observation(source_id: str) -> dict | None:
     return out
 
 
+def get_live_observation_by_tick(source_id: str, tick: int) -> dict | None:
+    """The persisted observation for one observed tick (None when never observed)."""
+    with engine().begin() as cx:
+        row = cx.execute(select(live_observations).where(
+            (live_observations.c.source_id == source_id)
+            & (live_observations.c.observed_tick == int(tick))).order_by(
+                live_observations.c.observed_at.desc()).limit(1)).mappings().fetchone()
+    if not row:
+        return None
+    out = dict(row)
+    out["payload"] = json.loads(out["payload"])
+    out["provenance_counts"] = json.loads(out["provenance_counts"] or "{}")
+    return out
+
+
 def list_live_observations(source_id: str | None = None, limit: int = 100) -> list[dict]:
     q = select(live_observations)
     if source_id:
@@ -578,6 +614,97 @@ def get_live_signal_history(source_id: str, signal_key: str, limit: int) -> list
     with engine().begin() as cx:
         rows = cx.execute(q).mappings().all()
     return [dict(r) for r in reversed(rows)]
+
+
+# ------------------------------------------------------- label-lag realized metrics
+
+def put_realized_metric(source_id: str, tick: int, metric_key: str, *,
+                        value: float | None, coverage: float | None, status: str,
+                        reason: str | None = None) -> None:
+    """Upsert one realized-metric row; a final row (realized, evicted) is never changed.
+
+    The backfill may revisit a tick on every cycle until labels land, so non-final
+    statuses (no_labels, pending, insufficient_coverage, single_class, error) are
+    replaced in place.  Once a tick is realized, a later eviction by the producer must
+    not erase the measured value; once evicted, nothing can be measured any more.
+    """
+    row = {
+        "source_id": source_id, "tick": int(tick), "metric_key": metric_key,
+        "value": None if value is None else float(value),
+        "coverage": None if coverage is None else float(coverage),
+        "status": status, "reason": reason, "computed_at": time.time(),
+    }
+    where = ((live_realized_metrics.c.source_id == source_id)
+             & (live_realized_metrics.c.tick == int(tick))
+             & (live_realized_metrics.c.metric_key == metric_key))
+    with engine().begin() as cx:
+        existing = cx.execute(select(live_realized_metrics.c.status).where(where)).fetchone()
+        if existing is None:
+            try:
+                with cx.begin_nested():
+                    cx.execute(insert(live_realized_metrics), row)
+                return
+            except IntegrityError:  # another lease holder won after our SELECT
+                existing = cx.execute(
+                    select(live_realized_metrics.c.status).where(where)).one()
+        if existing[0] in REALIZED_FINAL_STATUSES:
+            return
+        cx.execute(update(live_realized_metrics).where(where).values(
+            value=row["value"], coverage=row["coverage"], status=status,
+            reason=reason, computed_at=row["computed_at"]))
+
+
+def get_realized_metric(source_id: str, tick: int, metric_key: str) -> dict | None:
+    with engine().begin() as cx:
+        row = cx.execute(select(live_realized_metrics).where(
+            (live_realized_metrics.c.source_id == source_id)
+            & (live_realized_metrics.c.tick == int(tick))
+            & (live_realized_metrics.c.metric_key == metric_key))).mappings().fetchone()
+    return dict(row) if row else None
+
+
+def latest_realized(source_id: str, metric_key: str) -> dict | None:
+    """The highest tick whose row is `realized` (the value the lane is graded on)."""
+    with engine().begin() as cx:
+        row = cx.execute(select(live_realized_metrics).where(
+            (live_realized_metrics.c.source_id == source_id)
+            & (live_realized_metrics.c.metric_key == metric_key)
+            & (live_realized_metrics.c.status == "realized")).order_by(
+                live_realized_metrics.c.tick.desc()).limit(1)).mappings().fetchone()
+    return dict(row) if row else None
+
+
+def realized_history(source_id: str, metric_key: str, limit: int) -> list[dict]:
+    """Realized rows only, ascending tick, shaped like live_signal_history entries."""
+    from .engines import health
+    q = (select(live_realized_metrics.c.tick, live_realized_metrics.c.value)
+         .where((live_realized_metrics.c.source_id == source_id)
+                & (live_realized_metrics.c.metric_key == metric_key)
+                & (live_realized_metrics.c.status == "realized"))
+         .order_by(live_realized_metrics.c.tick.desc()).limit(max(1, limit)))
+    with engine().begin() as cx:
+        rows = cx.execute(q).fetchall()
+    return [{"tick": int(tick), "value": value,
+             "health": health.evaluate(metric_key, value)} for tick, value in reversed(rows)]
+
+
+def ticks_needing_realization(source_id: str, metric_key: str, low: int, high: int) -> list[int]:
+    """Observed ticks in [low, high) whose realized row is absent or not yet final."""
+    if high <= low:
+        return []
+    with engine().begin() as cx:
+        observed = cx.execute(select(live_observations.c.observed_tick).distinct().where(
+            (live_observations.c.source_id == source_id)
+            & (live_observations.c.observed_tick >= int(low))
+            & (live_observations.c.observed_tick < int(high)))).scalars().all()
+        final = cx.execute(select(live_realized_metrics.c.tick).where(
+            (live_realized_metrics.c.source_id == source_id)
+            & (live_realized_metrics.c.metric_key == metric_key)
+            & (live_realized_metrics.c.tick >= int(low))
+            & (live_realized_metrics.c.tick < int(high))
+            & (live_realized_metrics.c.status.in_(sorted(REALIZED_FINAL_STATUSES))))
+        ).scalars().all()
+    return sorted(int(t) for t in set(observed) - set(final))
 
 
 def set_live_ack(observation_id: str, *, ok: bool, error: str | None = None) -> None:
@@ -613,10 +740,13 @@ def clear_live_state(source_id: str | None = None) -> None:
             cx.execute(delete(live_signal_history).where(
                 live_signal_history.c.observation_id.in_(obs_ids)))
             cx.execute(delete(live_observations).where(live_observations.c.source_id == source_id))
+            cx.execute(delete(live_realized_metrics).where(
+                live_realized_metrics.c.source_id == source_id))
             cx.execute(delete(live_source_cursors).where(live_source_cursors.c.source_id == source_id))
         else:
             cx.execute(delete(live_signal_history))
             cx.execute(delete(live_observations))
+            cx.execute(delete(live_realized_metrics))
             cx.execute(delete(live_source_cursors))
 
 
