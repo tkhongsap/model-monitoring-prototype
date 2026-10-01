@@ -43,10 +43,28 @@ def test_pull_accepts_supported_contract_versions(monkeypatch, version):
     assert env["contract_version"] == version
 
 
-def test_contract_version_error_is_a_telemetry_error_for_the_runner():
-    """The ML adapter's degrade path maps any pull failure to errors['telemetry'], which
-    holds the cursor; the new error must stay inside that family."""
-    assert issubclass(telemetry_http.ContractVersionError, RuntimeError)
+def test_unsupported_contract_version_holds_the_cursor(isolated_db, fake_producer, monkeypatch):
+    """An unsupported contract_version on the inference window surfaces as a telemetry
+    error (prefixed `contract:`) and the source cursor is held — never advanced on a
+    window the monitor cannot interpret."""
+    from app.adapters.ml_monitor import live_http as ml_live_http
+    from app.scenario import live_runner as live_runner_module
+
+    real_pull = ml_live_http.pull
+
+    def pull_with_bad_version(base_url, path, params=None, timeout=30.0):
+        if path == "/telemetry/inferences":
+            raise telemetry_http.ContractVersionError(
+                "contract: unsupported contract_version '0.9' from /telemetry/inferences")
+        return real_pull(base_url, path, params, timeout)
+
+    monkeypatch.setattr(ml_live_http, "pull", pull_with_bad_version)
+    runner = live_runner_module.LiveRunner(churn_url="https://producer.test")
+    out = runner.tick()
+    assert out.get("cursor_held") is True
+    assert "contract" in out["errors"]["telemetry"]
+    assert db.get_live_source("AICT-L01")["next_tick"] == 0
+    assert db.get_live_source("AICT-L01")["state"] == "error"
 
 
 def test_pull_meta_rejects_unsupported_contract_version_when_present(monkeypatch):

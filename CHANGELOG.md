@@ -27,7 +27,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `lib/api-client-react`, `lib/db`, `artifacts/mockup-sandbox`, the TypeScript stub under
   `artifacts/api-server/src` (plus its `build.mjs` / `tsconfig.json`; the Replit
   `artifact.toml` wrapper and a minimal `package.json` stay), `backend/fly.toml`,
-  `backend/Dockerfile`, `scripts/src/hello.ts` and `scripts/tsconfig.json`.
+  `backend/Dockerfile`, `backend/.dockerignore`, `scripts/src/hello.ts` and
+  `scripts/tsconfig.json`.
 - Unused npm dependencies removed: `@replit/connectors-sdk`, `@tanstack/react-query`,
   `@workspace/api-client-react`, the `drizzle-orm` / `tsx` catalog entries and the
   `@expo/ngrok-bin` platform overrides. `pnpm-lock.yaml` regenerated.

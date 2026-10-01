@@ -880,6 +880,12 @@ Per-use-case thresholds; LIME in production; §14 sampling policy; Alembic; Prom
 - E1: the strict-live frontend workflow's path filters never referenced `lib/**`, so
   they are unchanged; `pnpm run build:live` / `check:strict-live` were not run on this
   macOS host (documented limitation) — the workflow proves them on the PR.
+- E2: the spec's `errors["contract"]` key is realised as `errors["telemetry"]` with a
+  `contract:`-prefixed message: `ContractVersionError` is raised from `pull`, so it rides
+  the existing degrade path that holds the cursor without new runner/UI plumbing
+  (`test_unsupported_contract_version_holds_the_cursor` pins the behaviour).
+- E1 (review): `backend/.dockerignore` was orphaned by the Dockerfile/fly.toml deletion
+  and is removed too.
 - E2: `pull_meta` validates `contract_version` only when the advisory envelope carries
   the field (a v1.0 producer may omit it); `pull` requires it. The validation needed no
   test fake changes: every existing `httpx.get` seam and the `fake_producer` fixture
