@@ -181,6 +181,13 @@ def _signal_view(sig: dict, s_health: dict, extra: dict | None = None) -> dict:
     return out
 
 
+def _rollup_meta(hand_set: dict, excluded_lanes: set, excluded_keys: set) -> dict:
+    """The rollup inputs, persisted with the payload so `realized_view.apply_realized`
+    can recompute lanes/overall once a lagged label lands (read-time, never a rewrite)."""
+    return {"hand_set_lanes": dict(hand_set), "excluded_lanes": sorted(excluded_lanes),
+            "excluded_keys": sorted(excluded_keys)}
+
+
 def _ahead_of_app(base_url: str, read_tick: int, uc: str) -> tuple[dict | None, dict]:
     """Cursor sync: best-effort /telemetry/meta; the monitor reads only CLOSED windows
     (tick < latest_tick — the latest window is still open: /chat appends to it, contract
@@ -256,6 +263,7 @@ class LiveRunner:
         return {
             "use_case_id": LIVE_UC, "tick": t, "mode": "live",
             "signals": _signal_view(sig, s_health, extra), "lanes": lanes, "overall": overall,
+            "rollup_meta": _rollup_meta(_HAND_SET, _EXCLUDED_LANES, excluded),
             "lane_reasons": {lane: _NOT_INSTRUMENTED for lane in _HAND_SET},
             "drifted_features": records.get("drifted_features", []),
             "reference_auc": records.get("reference_auc"),
@@ -327,6 +335,7 @@ class LiveLLMRunner:
         return {
             "use_case_id": LIVE_LLM_UC, "tick": t, "mode": "live",
             "signals": _signal_view(sig, s_health), "lanes": lanes, "overall": overall,
+            "rollup_meta": _rollup_meta(_HAND_SET_LLM, _EXCLUDED_LANES_LLM, set()),
             "lane_reasons": {lane: _NOT_INSTRUMENTED for lane in _HAND_SET_LLM},
             "judge": (config.LLM_JUDGE_MODEL if config.ANTHROPIC_API_KEY
                       else ("required-unavailable" if config.strict_live_mode() else "heuristic-v1")),
@@ -419,6 +428,7 @@ class LiveNBARunner:
         return {
             "use_case_id": LIVE_NBA_UC, "tick": t, "mode": "live",
             "signals": _signal_view(sig, s_health, extra), "lanes": lanes, "overall": overall,
+            "rollup_meta": _rollup_meta(hand_set, excluded_lanes, excluded),
             "lane_reasons": {lane: _NOT_INSTRUMENTED for lane in _HAND_SET_NBA},
             "drifted_features": records.get("drifted_features", []),
             "reference_auc": records.get("reference_auc"),

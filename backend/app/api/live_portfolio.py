@@ -18,6 +18,7 @@ import json
 from .. import config, db
 from ..engines.health import LANES
 from ..live_sync import portfolio_sync, source_sync
+from ..realized_view import REALIZED_KEYS, apply_realized
 
 LIVE_UCS = ["AICT-L01", "AICT-L02", "AICT-L03"]
 
@@ -44,7 +45,7 @@ _EXTRA_KEYS = (
     "lane_reasons", "window_id", "source_instance_id", "opened_at", "closed_at",
     "content_sha256", "first_record_id", "last_record_id", "provenance_counts",
     "record_count", "source_lag_ms", "observation_id", "ack_status", "ack_error",
-    "empty_window",
+    "empty_window", "realized_as_of_tick", "acceptance_as_of_tick", "rollup_meta",
 )
 
 
@@ -115,7 +116,7 @@ def portfolio_rows() -> list[dict]:
     rows = []
     for uc in LIVE_UCS:
         desc = descs[uc]
-        s = live_runner(uc).state()
+        s = apply_realized(uc, live_runner(uc).state())
         if s is None:
             rows.append(_not_observed_row(uc, desc))    # waiting for first window, not offline
             continue
@@ -140,6 +141,8 @@ def portfolio_rows() -> list[dict]:
             "feedback_unknown_reason": _feedback_unknown_reason(s, desc),
             "tooltips": _tooltips(s),
             "errors": errors,
+            "realized_as_of_tick": s.get("realized_as_of_tick"),
+            "acceptance_as_of_tick": s.get("acceptance_as_of_tick"),
             **sync,
         })
     return rows
@@ -153,7 +156,7 @@ def portfolio_summary() -> dict:
     overall_counts = {"Green": 0, "Amber": 0, "Red": 0, "Unknown": 0}
     lane_counts = {lane: {"Green": 0, "Amber": 0, "Red": 0, "Unknown": 0} for lane in LANES}
     for uc in LIVE_UCS:
-        s = live_runner(uc).state()
+        s = apply_realized(uc, live_runner(uc).state())
         if s is None:
             as_of[uc] = None
             overall_counts["Unknown"] += 1
@@ -188,7 +191,7 @@ def detail(uc: str) -> dict | None:
     from ..scenario.live_runner import live_runner
     desc = load_descriptors()[uc]
     cadence = _cadence(desc.get("risk_tier", "Unknown"))
-    s = live_runner(uc).state()
+    s = apply_realized(uc, live_runner(uc).state())
     if s is None:  # never observed — waiting for the first window (header-only, never raises)
         sync = source_sync(uc)
         return {
@@ -221,12 +224,18 @@ def detail(uc: str) -> dict | None:
             "health": "Unknown" if offline else sig.get("health"),
             "last_observed_health": sig.get("health"),
             "pending_reason": sig.get("pending_reason"),  # lifted from the nested signal
+            "as_of_tick": sig.get("as_of_tick"),          # realized metrics: label tick
+            "coverage": sig.get("coverage"),
             "green_bar": sig.get("green_bar"),
             "red_bar": sig.get("red_bar"),
             "unit": sig.get("unit", ""),
             "direction": sig.get("direction", ""),
             "provenance": "live",
-            "history": db.get_live_signal_history(uc, key, config.LIVE_HIST_MAX),
+            # realized metrics are graded on lagged labels, so their sparkline comes from
+            # live_realized_metrics; the per-observation history rows stay as stored
+            "history": (db.realized_history(uc, key, config.LIVE_HIST_MAX)
+                        if key in REALIZED_KEYS
+                        else db.get_live_signal_history(uc, key, config.LIVE_HIST_MAX)),
         })
     out = {
         **desc,
