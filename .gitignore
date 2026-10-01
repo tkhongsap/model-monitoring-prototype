@@ -57,9 +57,8 @@ backend/artifacts/*
 __pycache__/
 *.pyc
 
-# legacy Next.js frontend — superseded by the React/Vite artifacts/control-tower app
-# (its canonical copy is archived under .migration-backup/frontend/). Kept on disk but
-# not tracked: it is not a pnpm workspace package and carries only build cruft.
+# legacy Next.js frontend — superseded by the React/Vite artifacts/control-tower app.
+# Not a pnpm workspace package; anything left on disk there is build cruft.
 /frontend/
 
 # --- env / secrets (NEVER commit real keys) ---

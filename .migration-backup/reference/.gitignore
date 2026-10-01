@@ -1,6 +1,0 @@
-# dedicated venv (heavy ML stack) and generated artifacts — not source
-.venv/
-artifacts/
-.env
-__pycache__/
-*.pyc

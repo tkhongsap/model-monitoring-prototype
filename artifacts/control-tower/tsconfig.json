@@ -16,10 +16,5 @@
       "@/*": ["./src/*"],
       "@app-entry": ["./src/App.tsx"]
     }
-  },
-  "references": [
-    {
-      "path": "../../lib/api-client-react"
-    }
-  ]
+  }
 }

@@ -1,7 +1,0 @@
-# Replit runs Linux — shell/config files must stay LF even when edited on Windows
-# (CRLF in a bash script fails on Replit with "$'\r': command not found").
-*.sh text eol=lf
-.replit text eol=lf
-replit.nix text eol=lf
-*.nix text eol=lf
-Dockerfile text eol=lf

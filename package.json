@@ -7,13 +7,9 @@
     "build": "pnpm run typecheck && pnpm -r --if-present run build",
     "build:live": "pnpm --filter @workspace/control-tower run build:live",
     "check:strict-live": "pnpm --filter @workspace/control-tower run check:strict-live",
-    "typecheck:libs": "tsc --build",
-    "typecheck": "pnpm run typecheck:libs && pnpm -r --filter \"./artifacts/**\" --filter \"./scripts\" --if-present run typecheck"
+    "typecheck": "pnpm -r --filter \"./artifacts/**\" --if-present run typecheck"
   },
   "private": true,
-  "dependencies": {
-    "@replit/connectors-sdk": "^0.4.1"
-  },
   "devDependencies": {
     "prettier": "^3.9.4",
     "typescript": "~5.9.3"
