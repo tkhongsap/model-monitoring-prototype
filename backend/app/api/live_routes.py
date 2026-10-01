@@ -12,6 +12,7 @@ import hmac
 import anyio
 from fastapi import APIRouter, Header, HTTPException
 from fastapi.responses import Response
+from pydantic import BaseModel, Field
 
 from .. import config, db
 from ..live_poller import poller
@@ -35,6 +36,14 @@ def _worker_token_matches(supplied: str, expected: str) -> bool:
     except UnicodeEncodeError:
         return False
     return hmac.compare_digest(supplied_bytes, expected_bytes)
+
+
+def _require_worker_token(authorization: str | None) -> None:
+    """401 unless the request carries the configured worker bearer token."""
+    expected = config.LIVE_WORKER_TOKEN
+    supplied = authorization.removeprefix("Bearer ").strip() if authorization else ""
+    if not expected or not supplied or not _worker_token_matches(supplied, expected):
+        raise HTTPException(401, detail="invalid worker token")
 
 
 def _public_payload(payload: dict) -> dict:
@@ -120,13 +129,56 @@ def artifact(artifact_id: str):
 
 @router.post("/live/poll")
 async def run_poll_cycle(authorization: str | None = Header(default=None)):
-    expected = config.LIVE_WORKER_TOKEN
-    supplied = authorization.removeprefix("Bearer ").strip() if authorization else ""
-    if not expected or not supplied or not _worker_token_matches(supplied, expected):
-        raise HTTPException(401, detail="invalid worker token")
+    _require_worker_token(authorization)
     completed = await anyio.to_thread.run_sync(poller().run_once)
     return {
         "completed": completed,
         "lease": "acquired" if completed else "held_by_another_worker",
         "sync": portfolio_sync(live_portfolio.LIVE_UCS),
     }
+
+
+# --- operator unstick (spec D.3): worker token, mutating, audited ---------------------
+
+class SkipRequest(BaseModel):
+    reason: str = Field(min_length=1, max_length=500)
+
+
+@router.post("/live/sources/{uc}/skip")
+def skip_source_tick(uc: str, body: SkipRequest,
+                     authorization: str | None = Header(default=None)):
+    """Skip the tick a source's cursor is held on (state `error`), with a reason.
+
+    Writes a stub observation (`record_count=0`, `skipped=true`) so the window stays
+    auditable, marks its realized rows final so the backfill never re-pulls the poisoned
+    window, advances the cursor and drops the in-memory runner so it reloads the cursor.
+    409 when the cursor is not held on an error.
+    """
+    _require_worker_token(authorization)
+    if uc not in live_portfolio.LIVE_UCS:
+        raise HTTPException(404, detail=f"unknown live use case {uc}")
+    reason = body.reason.strip()
+    if not reason:
+        raise HTTPException(422, detail="reason must not be blank")
+    from ..scenario import live_runner as live_runner_module
+    try:
+        result = db.skip_live_tick(uc, reason)
+    except db.NothingToSkip as exc:
+        raise HTTPException(409, detail=str(exc)) from exc
+    realized_keys = live_runner_module.realized_keys_for(uc)
+    for key in realized_keys:
+        db.put_realized_metric(uc, result["skipped_tick"], key, value=None, coverage=None,
+                               status="no_labels", final=True,
+                               reason=f"tick skipped by operator: {reason}")
+    live_runner_module.reset_live_runner(uc)
+    return {**result, "sync": source_sync(uc)}
+
+
+@router.post("/live/sources/{uc}/reset-ack")
+def reset_source_acks(uc: str, authorization: str | None = Header(default=None)):
+    """Abandon a source's pending/errored producer acknowledgements so a poisoned ack is
+    no longer retried every cycle. Observations and the cursor are untouched."""
+    _require_worker_token(authorization)
+    if uc not in live_portfolio.LIVE_UCS:
+        raise HTTPException(404, detail=f"unknown live use case {uc}")
+    return {"use_case_id": uc, "abandoned": db.abandon_live_acks(uc)}

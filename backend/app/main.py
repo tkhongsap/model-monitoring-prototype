@@ -71,9 +71,12 @@ async def strict_live_route_isolation(request: Request, call_next):
     """
     if config.strict_live_mode() and request.url.path.startswith("/api/"):
         allowed_exact = {"/api/health", "/api/healthz", "/api/version", "/api/readiness"}
-        allowed = request.url.path in allowed_exact or request.url.path.startswith("/api/live/")
-        worker_poll = request.method == "POST" and request.url.path == "/api/live/poll"
-        if (request.method != "GET" and not worker_poll) or not allowed:
+        path = request.url.path
+        allowed = path in allowed_exact or path.startswith("/api/live/")
+        # the only mutating surface: the worker-token poll and operator unstick routes
+        worker_post = request.method == "POST" and (
+            path == "/api/live/poll" or path.startswith("/api/live/sources/"))
+        if (request.method != "GET" and not worker_post) or not allowed:
             return JSONResponse({"detail": "not available in strict live mode"}, status_code=404)
     return await call_next(request)
 

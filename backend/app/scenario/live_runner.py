@@ -509,6 +509,15 @@ def live_runner(uc: str = LIVE_UC):
         return _ml_runner
 
 
+def realized_keys_for(uc: str) -> tuple[str, ...]:
+    """The realized-metric keys a use case's runner writes (no runner is constructed)."""
+    if uc == LIVE_UC:
+        return LiveRunner.realized_keys
+    if uc == LIVE_NBA_UC:
+        return LiveNBARunner.realized_keys
+    return ()
+
+
 def reset_live_runner(uc: str | None = None) -> None:
     global _ml_runner, _llm_runner, _nba_runner
     if uc in (None, LIVE_UC):

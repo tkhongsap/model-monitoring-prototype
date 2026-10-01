@@ -624,6 +624,47 @@ def put_live_observation(source_id: str, payload: dict, *, source_tick: int | No
     return observation_id, inserted
 
 
+class NothingToSkip(RuntimeError):
+    """The source cursor is not held on an error, so there is no poisoned tick to skip."""
+
+
+def skip_live_tick(source_id: str, reason: str) -> dict:
+    """Operator unstick (spec D.3): mark the held tick skipped and advance the cursor.
+
+    Refuses unless the cursor `state` is `error` (a healthy or merely waiting source is
+    never skipped).  Writes an auditable stub observation (`record_count=0`,
+    `skipped=True`, the reason under `errors["skipped"]`, every lane Unknown) through
+    `put_live_observation`, the only path that advances a cursor.
+    """
+    from .engines import health
+    cursor = get_live_source(source_id)
+    if cursor["state"] != "error":
+        raise NothingToSkip(
+            f"{source_id} cursor is '{cursor['state']}', not 'error': nothing to skip")
+    tick = int(cursor["next_tick"])
+    reason = str(reason)
+    payload = {
+        "use_case_id": source_id, "tick": tick, "observed_tick": tick, "mode": "live",
+        "skipped": True, "skip_reason": reason, "skipped_error": cursor.get("last_error"),
+        "window_id": f"{source_id}:skipped-t{tick}", "record_count": 0,
+        "signals": {}, "lanes": {lane: "Unknown" for lane in health.LANES},
+        "overall": "Unknown",
+        "lane_reasons": {lane: f"Unknown — tick skipped by operator: {reason}"
+                         for lane in health.LANES},
+        "errors": {"skipped": reason},
+        "source_tick": cursor.get("source_tick"), "producer_tick": cursor.get("source_tick"),
+    }
+    backlog = max(0, int(cursor.get("backlog") or 0) - 1)
+    state = "catching_up" if backlog else "at_tail"
+    payload.update({"backlog": backlog, "sync_state": state, "state": state})
+    observation_id, _ = put_live_observation(
+        source_id, payload, source_tick=cursor.get("source_tick"),
+        next_tick=tick + 1, backlog=backlog, state=state)
+    return {"use_case_id": source_id, "skipped_tick": tick, "next_tick": tick + 1,
+            "observation_id": observation_id, "reason": reason,
+            "previous_error": cursor.get("last_error")}
+
+
 def get_latest_live_observation(source_id: str) -> dict | None:
     with engine().begin() as cx:
         row = cx.execute(select(live_observations).where(
@@ -919,6 +960,17 @@ def set_live_ack(observation_id: str, *, ok: bool, error: str | None = None) -> 
                 ack_status="acknowledged" if ok else "error",
                 ack_error=None if ok else (error or "unknown acknowledgement error"),
                 acknowledged_at=time.time() if ok else None))
+
+
+def abandon_live_acks(source_id: str) -> int:
+    """Operator reset-ack (spec D.3): stop retrying a source's poisoned pending/error
+    acknowledgements. Observations and cursors are untouched; returns the row count."""
+    with engine().begin() as cx:
+        result = cx.execute(update(live_observations).where(
+            (live_observations.c.source_id == source_id)
+            & live_observations.c.ack_status.in_(["pending", "error"])).values(
+                ack_status="abandoned", acknowledged_at=None))
+    return int(result.rowcount or 0)
 
 
 def list_live_acks_to_retry(limit: int = 100) -> list[dict]:

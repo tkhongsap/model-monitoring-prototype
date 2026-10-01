@@ -46,6 +46,7 @@ _EXTRA_KEYS = (
     "content_sha256", "first_record_id", "last_record_id", "provenance_counts",
     "record_count", "source_lag_ms", "observation_id", "ack_status", "ack_error",
     "empty_window", "realized_as_of_tick", "acceptance_as_of_tick", "rollup_meta",
+    "skipped", "skip_reason",   # operator-skipped tick stub (spec D.3), auditable
 )
 
 
