@@ -61,8 +61,9 @@ def _get(url: str, **kwargs) -> httpx.Response:
 
 
 def _post(url: str, **kwargs) -> httpx.Response:
-    """POST with the same retry policy; acks and score write-back are idempotent on
-    the producer side (keyed by window / trace id), so a retried POST is safe."""
+    """POST with the same retry policy. Acknowledgements are idempotent on the producer
+    side (keyed by window id); score write-back passes `attempts=1` because its
+    idempotency is not promised by the contract."""
     return request_with_retry("POST", url, send=_send_post, **kwargs)
 
 
@@ -195,11 +196,15 @@ def push_scores(base_url: str, scores: list[dict], timeout: float = 10.0) -> dic
 
     scores: [{"trace_id": str, "name": str, "value": float, "comment"?: str}, ...]
     Returns the response JSON on success. Raises on HTTP/network error (caller degrades)."""
+    # Single attempt: the contract does not promise that /telemetry/scores dedupes on
+    # (trace_id, name), so a retried POST could double-score a trace. The write-back is
+    # re-attempted on the next judged window anyway.
     r = _post(
         base_url.rstrip("/") + "/telemetry/scores",
         json={"scores": scores},
         headers={**_auth_headers(), "Content-Type": "application/json"},
         timeout=timeout,
+        attempts=1,
     )
     r.raise_for_status()
     payload = r.json()

@@ -152,16 +152,17 @@ def test_skip_is_one_transaction(client, monkeypatch):
     def boom(cx, *args, **kwargs):
         raise RuntimeError("realized write failed")
 
-    monkeypatch.setattr(db, "_put_realized_metric", boom)
-    with pytest.raises(RuntimeError, match="realized write failed"):
-        client.post(f"/api/live/sources/{UC}/skip", json={"reason": "x"}, headers=AUTH)
+    # scope the failure injection so the fixture patches (live mode, isolated DB,
+    # worker token) stay in force for the successful retry below
+    with pytest.MonkeyPatch.context() as failing:
+        failing.setattr(db, "_put_realized_metric", boom)
+        with pytest.raises(RuntimeError, match="realized write failed"):
+            client.post(f"/api/live/sources/{UC}/skip", json={"reason": "x"}, headers=AUTH)
     cursor = db.get_live_source(UC)
     assert cursor["state"] == "error" and cursor["next_tick"] == 5
     assert db.get_live_observation_by_tick(UC, 5) is None
     assert db.get_realized_metric(UC, 5, "realized_roc_auc") is None
 
-    monkeypatch.undo()
-    monkeypatch.setattr(config, "LIVE_WORKER_TOKEN", TOKEN)
     response = client.post(f"/api/live/sources/{UC}/skip", json={"reason": "x"}, headers=AUTH)
     assert response.status_code == 200, response.text   # the retry succeeds
     assert db.get_live_source(UC)["next_tick"] == 6

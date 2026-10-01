@@ -843,6 +843,7 @@ Per-use-case thresholds; LIME in production; §14 sampling policy; Alembic; Prom
   held error as `skipped_error` and sets `backlog - 1` / `catching_up|at_tail` so the
   cursor row is consistent until the next contact. `abandon_live_acks` sets
   `ack_status = "abandoned"` (a new value, excluded from `list_live_acks_to_retry`).
+- D4: `live_baselines` is migration 7, not 6 (6 was taken by the slice C alert tables).
 - D4: `LiveHttpNBAAdapter.__init__` cannot read the baseline (the model version is
   unknown until `_ensure_baseline` runs), so the cold-start read happens lazily in
   `_on_rebaseline` and, once per version, in `_extend` before a capture
