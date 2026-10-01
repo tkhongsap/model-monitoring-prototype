@@ -21,8 +21,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Operator unstick: `POST /api/live/sources/{uc}/skip` (worker token, `{"reason"}`)
   skips the tick a source is held on — only when the cursor state is `error` (409
   otherwise) — writing an auditable stub observation (`record_count=0`, `skipped=true`,
-  reason) and advancing the cursor; `POST /api/live/sources/{uc}/reset-ack` abandons a
-  poisoned pending acknowledgement. Every other POST under `/api/live/` is still 404.
+  reason, `ack_status=skipped` so it is never acknowledged to the producer), finalising
+  the tick's realized rows and advancing the cursor in one transaction;
+  `POST /api/live/sources/{uc}/reset-ack` abandons a poisoned pending acknowledgement. Every other POST under `/api/live/` is still 404.
   Runbook: `docs/STRICT-LIVE.md` "Unsticking a source".
 - The NBA baseline offer mix is persisted per `(source, model_version)` in the new
   `live_baselines` table (migration 7) and read on cold start, so

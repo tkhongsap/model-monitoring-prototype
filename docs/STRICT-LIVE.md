@@ -37,8 +37,8 @@ Duplicate `window_id` values are idempotent; the same id with a different
 recomputes that digest from the exact public primary-record JSON before grading. Failed
 producer acknowledgements remain durable and are retried on later lease cycles.
 
-Every outbound call — telemetry pulls, the model artifact, acknowledgements, score
-write-back and the alert webhook — uses one retry policy (contract §12,
+Every outbound telemetry or webhook call — telemetry pulls, the model artifact,
+acknowledgements, score write-back and the alert webhook — uses one retry policy (contract §12,
 `backend/app/http_retry.py`): three attempts on 429/502/503/504 and connection errors,
 exponential backoff 0.5 s → 4 s with ±25 % jitter, `Retry-After` honoured and capped at
 4 s. A 404 or any other 4xx is never retried. When the retries are exhausted the last
@@ -151,10 +151,13 @@ nothing else can move a cursor, and a browser cannot reach these routes.
    ```
 
    The response carries `skipped_tick`, `next_tick`, `observation_id` and the previous
-   error. The monitor writes a stub observation for the tick (`record_count: 0`,
-   `skipped: true`, every lane Unknown, the reason under `errors.skipped`), marks its
-   realized rows final so the backfill never pulls the window again, advances the
-   cursor and reloads the runner. `409` means the cursor is not held on an error
+   error. In one transaction the monitor writes a stub observation for the tick
+   (`record_count: 0`, `skipped: true`, every lane Unknown, the reason under
+   `errors.skipped`), marks its realized rows final so the backfill never pulls the
+   window again and advances the cursor; then it reloads the runner. The stub was never
+   served by the producer, so it is stored with `ack_status: "skipped"` and is never
+   acknowledged to the producer (the acknowledgement retry loop ignores it). `409`
+   means the cursor is not held on an error
    (`state` is `at_tail`, `catching_up`, `idle`, `stale` or `connecting`): a healthy or
    merely waiting source is never skipped. `401` is a wrong or missing token; `404` an
    unknown use case id.

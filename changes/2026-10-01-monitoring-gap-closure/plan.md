@@ -850,3 +850,22 @@ Per-use-case thresholds; LIME in production; §14 sampling policy; Alembic; Prom
   warning and degrade to the in-memory mix; `clear_live_state` also clears
   `live_baselines`. The restart test changes the served mix between the two adapter
   instances so a re-capture cannot pass it.
+- D3 (review fix): the skip stub is stored `ack_status = "skipped"` (new value, excluded
+  from `list_live_acks_to_retry` and from `abandon_live_acks`) via a new
+  `acknowledge: bool = True` knob on `put_live_observation`; with a producer configured
+  the old `pending` stub would have POSTed a synthetic `window_id` the producer never
+  served, failed, and been retried every cycle. `skip_live_tick(source_id, reason,
+  realized_keys=())` now writes the stub, the cursor advance and the final `no_labels`
+  realized rows in ONE transaction (`_put_live_observation(cx, …)` and
+  `_put_realized_metric(cx, …)` cores take the caller's connection) instead of the route
+  issuing separate commits, so a failed realized write leaves the cursor held and the
+  skip retryable. Making that atomic on SQLite exposed the pysqlite SAVEPOINT caveat
+  (`begin_nested` rows survived an outer rollback): `db.engine()` now installs the
+  SQLAlchemy-documented `isolation_level=None` + explicit `BEGIN` hooks for `sqlite:`
+  URLs (`_enable_sqlite_savepoints`); Postgres is unaffected.
+- D4 (review, minor): `_store_baseline` is a no-op while `_version is None` (contract
+  1.0 producer without `/model/artifact`), so an un-versioned capture stays in memory
+  instead of persisting a row keyed `"None"`.
+- D2/D3 (review, note): the strict-live middleware admits POST only to
+  `/api/live/poll` and `re.fullmatch(r"/api/live/sources/[^/]+/(skip|reset-ack)")`, so
+  other paths under `/api/live/sources/` get the middleware's own 404 body.
