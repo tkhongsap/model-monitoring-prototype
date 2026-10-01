@@ -870,3 +870,22 @@ Per-use-case thresholds; LIME in production; §14 sampling policy; Alembic; Prom
 - D2/D3 (review, note): the strict-live middleware admits POST only to
   `/api/live/poll` and `re.fullmatch(r"/api/live/sources/[^/]+/(skip|reset-ack)")`, so
   other paths under `/api/live/sources/` get the middleware's own 404 body.
+- E1: `scripts/package.json` also lost its `tsx` / `@types/node` devDependencies (no
+  TypeScript remains under `scripts/`, only the plain-node bundle check), and the `tsx`
+  catalog entry and the drizzle-kit `@esbuild-kit/esm-loader` override went with
+  `drizzle-orm`. Untracked, gitignored build cruft left on disk under `lib/*/`,
+  `artifacts/mockup-sandbox/` and `scripts/` (`node_modules`, `dist`, `*.tsbuildinfo`)
+  was not deleted (not ours to remove); pnpm ignores those directories because they hold
+  no `package.json`. `.replitignore` dropped its `.migration-backup` line too.
+- E1: the strict-live frontend workflow's path filters never referenced `lib/**`, so
+  they are unchanged; `pnpm run build:live` / `check:strict-live` were not run on this
+  macOS host (documented limitation) — the workflow proves them on the PR.
+- E2: `pull_meta` validates `contract_version` only when the advisory envelope carries
+  the field (a v1.0 producer may omit it); `pull` requires it. The validation needed no
+  test fake changes: every existing `httpx.get` seam and the `fake_producer` fixture
+  already emitted `"contract_version": "1.1"`. The missing-latency count lives in
+  `LaneResult.metadata["latency_missing"]` (merged into the stored observation by the
+  runner), and sampled/stored trace latency is `None` rather than a rounded 0.0.
+- E2 docs: `docs/LIVE-DEMO.md` has no mockup-sandbox / port-8081 clash note and no
+  Fly or Docker reference to remove (8081 there is the producer's account API), so the
+  file is unchanged; `TESTING.md` and `replit.md` reference no deleted package.

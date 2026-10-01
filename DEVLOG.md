@@ -41,10 +41,51 @@ depend on. The spec is
 3. Slice C — alerting (transition state machine, API, webhook, UI, ADR 0001): merged
    (#11).
 4. Slice D — operational resilience (HTTP retry, structured logging, operator skip, NBA
-   baseline persistence): in progress (this branch, `feat/live-resilience`).
-5. Slice E — repository hygiene and contract strictness: not started.
+   baseline persistence): merged (#12).
+5. Slice E — repository hygiene and contract strictness: done (this branch,
+   `chore/hygiene-and-contract-strictness`).
 
 ## Work log
+
+### 2026-10-02 — repository hygiene and contract strictness (slice E)
+
+- Changed: deleted the dead scaffold (`.migration-backup/`, `lib/*`,
+  `artifacts/mockup-sandbox`, `artifacts/api-server/src` + `build.mjs` + `tsconfig.json`,
+  `backend/fly.toml`, `backend/Dockerfile`, `scripts/src/hello.ts`,
+  `scripts/tsconfig.json`); `artifacts/api-server` keeps `.replit-artifact/artifact.toml`
+  and a minimal `package.json`. `pnpm-workspace.yaml` lists `artifacts/*` and `scripts`
+  only and drops the `@tanstack/react-query`, `drizzle-orm`, `tsx` catalog entries, the
+  `@expo/ngrok-bin` overrides and the drizzle-kit `@esbuild-kit/esm-loader` override;
+  root `package.json` loses `@replit/connectors-sdk` and `typecheck:libs`;
+  `artifacts/control-tower` loses `@tanstack/react-query` /
+  `@workspace/api-client-react` and its `lib/api-client-react` project reference;
+  `.gitignore` / `.replitignore` no longer mention `.migration-backup`. Backend:
+  `telemetry_http.pull` validates `contract_version` (`SUPPORTED_CONTRACT_VERSIONS =
+  {"1.0", "1.1"}`, `ContractVersionError`), `pull_meta` checks it when present;
+  `llm_eval/live_http.py` excludes traces without `latency_s` from the p95, counts
+  them in `metadata["latency_missing"]`, stores `None` instead of 0.0, and its docstring
+  names `claude-haiku-4-5`; `config.live_configuration_errors` requires `https` for the
+  four producer URLs. Docs: CHANGELOG, README, `docs/STRICT-LIVE.md`, this log.
+- Evidence: from `backend/`, `.venv/bin/python -m pytest -q -m "not slow"` → 159 passed,
+  9 deselected (144 before this slice). New `tests/test_contract_strictness.py` (15 tests:
+  `"0.9"` / `"2.0"` / `"1"` / missing rejected, `"1.0"` / `"1.1"` accepted, `pull_meta`
+  strict vs advisory, half-missing latency → p95 9.6 and `latency_missing == 5`, all
+  missing → `p95_latency_s` None, docstring guard, `http://` → four configuration
+  errors, `https://` → none, insecure switch bypass). From the repo root `pnpm install`
+  (lockfile regenerated: 3 added, 248 removed), `pnpm install --frozen-lockfile` → Done,
+  `pnpm run typecheck` → Done for `artifacts/control-tower` (the only package with a
+  `typecheck` script left). `bash -n` on the three `scripts/*.sh`; no `lib/`, `mockup`,
+  `fly` or `Dockerfile` reference remains in `.replit`, `scripts/`, the workflows or the
+  docs. `pnpm run build:live` and `pnpm run check:strict-live` are unavailable on this
+  macOS host (lockfile drops `@rollup/rollup-darwin-arm64`); the strict-live frontend
+  workflow runs them on the PR. Unavailable: real producer, Langfuse, live Claude judge.
+- Learned: the existing fakes already carried `contract_version: "1.1"` (the
+  `fake_producer` fixture and the `httpx.get` seams in `test_http_retry.py`), so the
+  validation landed without touching a test. `docs/LIVE-DEMO.md` never had a
+  mockup-sandbox / port 8081 clash note — port 8081 there is the producer's account API,
+  which is correct and stays.
+- Remaining: nothing in the five-slice plan. Known gaps below are out of scope or
+  unscheduled.
 
 ### 2026-10-01 — live resilience: retry, logging, operator skip, baseline persistence (slice D)
 
@@ -207,14 +248,11 @@ depend on. The spec is
 
 ## Known gaps
 
-- Dead scaffold remains (`.migration-backup/`, `lib/`, `artifacts/api-server/src`,
-  `artifacts/mockup-sandbox`, `backend/fly.toml`, `backend/Dockerfile`,
-  `scripts/src/hello.ts`, unused npm dependencies). Impact: misleading to new readers and
-  slower installs. Trigger: slice E.
-- Contract strictness: `contract_version` is not validated on pulled windows, `latency_s`
-  defaults to 0.0 when absent, producer URLs may be `http://` in strict live mode, and the
-  judge-model docstring in `backend/app/adapters/llm_eval/live_http.py` is wrong.
-  Trigger: slice E.
+- Two pre-existing slow-test failures: `backend/tests/test_calibration.py::
+  test_c3_estimated_auc_early_warning` and `::test_c8_recovery` raise `TypeError` on a
+  `None` `estimated_roc_auc` (`.venv/bin/python -m pytest -q -m slow`). Impact: the slow
+  demo-calibration suite is red; CI does not run `-m slow`. Trigger: unscheduled; not
+  touched by slice E.
 - Alert triage ownership (contract §18 Q1) is open at the contract level; resolved for
   this repository by [docs/adr/0001-alert-ownership.md](docs/adr/0001-alert-ownership.md)
   (RAI team via the webhook channel; producers are not paged). Alerts have no

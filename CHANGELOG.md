@@ -8,6 +8,30 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- Every pulled telemetry window must carry `contract_version` `"1.0"` or `"1.1"`;
+  any other value (or a missing field) is a `ContractVersionError`, recorded as the
+  window's telemetry error, and holds the source cursor. `/telemetry/meta` is checked
+  only when it carries the field (spec E.2).
+- Strict live mode requires `https://` for `LIVE_CHURN_URL`, `LIVE_CHATBOT_URL`,
+  `LIVE_NBA_URL` and `LIVE_PRODUCER_URL`; `GET /api/readiness` lists
+  `<NAME> must use https in strict live mode` otherwise. `ALLOW_INSECURE_LIVE_TESTING=1`
+  remains the only bypass (spec E.4).
+- Root `pnpm run typecheck` now runs the `artifacts/*` packages only (the `tsc --build`
+  over `lib/*` is gone with the libraries).
+
+### Deprecated or removed
+
+- Dead scaffold deleted (spec E.1): `.migration-backup/`, `lib/api-spec`, `lib/api-zod`,
+  `lib/api-client-react`, `lib/db`, `artifacts/mockup-sandbox`, the TypeScript stub under
+  `artifacts/api-server/src` (plus its `build.mjs` / `tsconfig.json`; the Replit
+  `artifact.toml` wrapper and a minimal `package.json` stay), `backend/fly.toml`,
+  `backend/Dockerfile`, `scripts/src/hello.ts` and `scripts/tsconfig.json`.
+- Unused npm dependencies removed: `@replit/connectors-sdk`, `@tanstack/react-query`,
+  `@workspace/api-client-react`, the `drizzle-orm` / `tsx` catalog entries and the
+  `@expo/ngrok-bin` platform overrides. `pnpm-lock.yaml` regenerated.
+
 ### Added
 
 - Operational resilience (spec D). Producer pulls, acknowledgements, score write-back
@@ -55,6 +79,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- A chatbot trace without `latency_s` is no longer read as 0.0 seconds: it is excluded
+  from `p95_latency_s` and counted in the observation's `latency_missing`; its stored
+  and sampled latency is `null` (spec E.3). The judge docstring in
+  `backend/app/adapters/llm_eval/live_http.py` now names the configured default model
+  (`claude-haiku-4-5`) instead of a wrong hard-coded id (spec E.5).
 - A closed producer window with `count=0` is stored as an observation (every signal
   Unknown, reason "empty window") and the source cursor advances; it no longer holds the
   cursor as a telemetry error (contract §6).

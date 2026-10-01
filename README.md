@@ -22,7 +22,8 @@ pnpm run typecheck
 
 Expected result: pytest reports all tests passed with `9 deselected` (the deselected
 tests are the slow DEMO-FULL bakes; exact counts live in `DEVLOG.md`) and
-`pnpm run typecheck` ends with `Done` for every package.
+`pnpm run typecheck` ends with `artifacts/control-tower typecheck: Done` (the only
+workspace package with a `typecheck` script).
 
 To see the API, from `backend/` run
 `CONTROL_TOWER_MODE=demo LIVE_POLL_SECONDS=0 .venv/bin/python -m uvicorn app.main:app --port 8000`
@@ -66,6 +67,11 @@ ai-use-cases producer (Reserved VM)              model-monitoring-prototype (Aut
 Sources of truth: [docs/MONITORING-CONTRACT.md](docs/MONITORING-CONTRACT.md) for the
 telemetry contract; `backend/app/db.py` for the schema (ordered in-code migrations);
 `backend/app/engines/health.py` for the grading bands.
+
+Contract strictness: every pulled window must carry `contract_version` `1.0` or `1.1`
+(anything else holds the cursor as a telemetry error); producer URLs must be `https://`
+in strict live mode; a chatbot trace without `latency_s` is excluded from the p95 and
+counted in `latency_missing`, never read as 0.0.
 
 Trust boundaries: the browser is read-only and never advances cursors. Mutating routes
 are limited to the worker-token `POST /api/live/poll`. Telemetry pulls and
@@ -134,6 +140,12 @@ Layout: `backend/app/engines/` are pure functions, `backend/app/adapters/` do I/
 
 ## Repository guide
 
+- Layout: `backend/` (FastAPI monitor, tests, `scripts/migrate.py`),
+  `artifacts/control-tower/` (Vite + React SPA), `artifacts/api-server/` (only the Replit
+  `artifact.toml` wrapper that points at `backend/run.sh`), `scripts/` (deploy, post-merge
+  and the strict-live bundle check), `docs/`, `changes/`. There is no `lib/`, Docker or Fly
+  configuration; `.github/workflows/strict-live-frontend.yml` runs `pnpm run build:live`
+  and `pnpm run check:strict-live` on Linux for every frontend or workspace change.
 - Agent instructions: [CLAUDE.md](CLAUDE.md) (mirrored for other tools by [AGENTS.md](AGENTS.md))
 - Testing contract: [TESTING.md](TESTING.md)
 - Current work, evidence and known gaps: [DEVLOG.md](DEVLOG.md)

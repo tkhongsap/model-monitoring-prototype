@@ -9,6 +9,8 @@ scenario, simulation, export, baked artifact, and browser-driven tick routes.
 - `DATABASE_URL`: managed PostgreSQL; SQLite is rejected by readiness.
 - `LIVE_CHURN_URL`, `LIVE_CHATBOT_URL`, `LIVE_NBA_URL`: external telemetry service URLs.
 - `LIVE_PRODUCER_URL`: portfolio gateway used for observation acknowledgements.
+  All four must be `https://` (the bearer token travels with every call); `http://` or a
+  localhost address is a configuration error.
 - `LIVE_TELEMETRY_TOKEN`: shared bearer token used for pulls, score write-back, and ack.
 - `LIVE_WORKER_TOKEN`: dedicated bearer token for `POST /api/live/poll`. Set the same
   value as GitHub Actions secret `MONITOR_WORKER_TOKEN` (never expose it to the SPA).
@@ -32,6 +34,8 @@ wakes the monitor every five minutes and waits for an authenticated, lease-prote
 warm; neither browsers nor GET health checks advance monitoring state. A heartbeat
 renews lease ownership while Evidently, SHAP, or Claude work is in flight.
 Each observation and its signal history are committed before the source cursor advances.
+Every window envelope must carry `contract_version` `1.0` or `1.1`; any other value, or
+a missing field, is a telemetry error that holds the cursor until the producer is fixed.
 Duplicate `window_id` values are idempotent; the same id with a different
 `content_sha256` is an integrity error and holds the cursor. The monitor independently
 recomputes that digest from the exact public primary-record JSON before grading. Failed
