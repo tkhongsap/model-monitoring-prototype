@@ -309,6 +309,61 @@ def test_labels_404_after_due_tick_is_final_no_labels(isolated_db, fake_producer
     assert db.get_realized_metric(UC, 1, KEY)["status"] == "pending"   # due at 4 > 3
 
 
+def test_labels_window_without_available_at_uses_monitor_due_tick(isolated_db, fake_producer):
+    """A producer that omits `available_at_tick` (v1.0) must not leave a non-final
+    `no_labels` row: the tick is `pending` until the monitor's own due tick (`t + L`)
+    closes, then final `no_labels`, the same as a 404 on the labels window."""
+    fake_producer.omit_available_at = True
+    runner = _runner()
+    fake_producer.latest = 2
+    runner.tick()
+    runner.tick()                       # ticks 0, 1 observed; monitor due ticks 3, 4
+    fake_producer.latest = 3
+    runner.tick()                       # observes 2; backfills 0, 1 with source tick 2
+    row = db.get_realized_metric(UC, 0, KEY)
+    assert row["status"] == "pending" and row["reason"] == "label lag" and row["final"] is False
+    runner.tick()                       # waiting at 3: still pending (tick 3 is open)
+    assert db.get_realized_metric(UC, 0, KEY)["status"] == "pending"
+    fake_producer.latest = 4
+    runner.tick()                       # observes 3; source tick 3 >= due tick 3
+    row = db.get_realized_metric(UC, 0, KEY)
+    assert row["status"] == "no_labels" and row["final"] is True
+    assert "due at tick 3" in row["reason"] and "available_at_tick" in row["reason"]
+    assert db.get_realized_metric(UC, 1, KEY)["status"] == "pending"
+    fake_producer.release_labels(1)
+    runner.tick()                       # waiting at 4: labels still land before the due tick
+    assert db.get_realized_metric(UC, 1, KEY)["status"] == "realized"
+
+
+def test_empty_and_undersized_windows_are_final_and_not_repulled(isolated_db, fake_producer):
+    """No label can ever realize a `count=0` or undersized window, so the backfill marks
+    it final at once instead of re-pulling its inferences for the whole window."""
+    fake_producer.empty.add(0)
+    runner = _runner()
+    fake_producer.latest = 2
+    runner.tick()                       # observes 0 (empty)
+    runner.tick()                       # observes 1; backfills 0
+    row = db.get_realized_metric(UC, 0, KEY)
+    assert row["status"] == "no_labels" and row["reason"] == "empty window"
+    assert row["final"] is True and row["value"] is None
+    fake_producer.calls.clear()
+    runner.tick()                       # waiting at 2
+    assert ("/telemetry/inferences", {"tick": 0}) not in fake_producer.calls
+    assert ("/telemetry/labels", {"tick": 0}) not in fake_producer.calls
+
+    # undersized: tick 1 is pending (600 records >= 500); raise the window size the
+    # adapter demands so the same window is now too small to realize
+    assert db.get_realized_metric(UC, 1, KEY)["status"] == "pending"
+    runner.ml.chunk_size = 10_000
+    runner.tick()                       # waiting at 2: backfills 1 as undersized
+    row = db.get_realized_metric(UC, 1, KEY)
+    assert row["status"] == "no_labels" and row["reason"].startswith("insufficient sample")
+    assert row["final"] is True
+    fake_producer.calls.clear()
+    runner.tick()
+    assert ("/telemetry/inferences", {"tick": 1}) not in fake_producer.calls
+
+
 def test_nba_overdue_tick_is_final_for_both_keys(isolated_db, fake_producer):
     runner = live_runner_module.LiveNBARunner(nba_url="https://producer.test")
     fake_producer.latest = 2

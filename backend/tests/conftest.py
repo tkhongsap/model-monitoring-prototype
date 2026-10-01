@@ -45,6 +45,8 @@ class FakeProducer:
     - `released`: ticks whose labels/rewards window has records
     - `evicted`: ticks whose inference window the producer no longer serves (HTTP 404)
     - `label_lag`: value advertised as `label_lag_ticks` / `reward_lag_ticks`
+    - `omit_available_at`: an unreleased labels window carries no `available_at_tick`
+      (a v1.0 producer, or one that leaves the field out)
     """
 
     def __init__(self) -> None:
@@ -53,6 +55,7 @@ class FakeProducer:
         self.empty: set[int] = set()
         self.released: dict[int, float] = {}      # tick -> label coverage fraction
         self.evicted: set[int] = set()
+        self.omit_available_at = False
         self.calls: list[tuple[str, dict | None]] = []
 
     # -- scripting helpers -------------------------------------------------------
@@ -114,8 +117,10 @@ class FakeProducer:
         if path in ("/telemetry/labels", "/telemetry/rewards"):
             if tick in self.released:
                 return self._window(tick, self.labels(tick, kind))
-            return {"contract_version": "1.1", "records": [], "count": 0,
-                    "available_at_tick": tick + self.label_lag}
+            env = {"contract_version": "1.1", "records": [], "count": 0}
+            if not self.omit_available_at:
+                env["available_at_tick"] = tick + self.label_lag
+            return env
         raise AssertionError(f"fake producer has no route for {path}")
 
     def pull_meta(self, base_url: str, timeout: float = 10.0, *, strict: bool = False) -> dict:

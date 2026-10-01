@@ -140,10 +140,11 @@ class LiveHttpMLAdapter:
         Spec B.2 "done" rule: when the labels window is still empty and its
         `available_at_tick` is at or before `source_tick` — the producer's latest CLOSED
         tick (`latest_tick - 1`), never the open one it is still writing — the tick is
-        final `no_labels` (`final=True`); before that it is `pending`.  A 404 on the
-        labels window alone is not eviction: it is `pending` and retried until `due_tick`
-        (the monitor's own `t + lag`, used because a 404 carries no `available_at_tick`)
-        is at or before `source_tick`, then final `no_labels`.
+        final `no_labels` (`final=True`); before that it is `pending`.  A labels window
+        that carries no `available_at_tick` (a 404, or a producer that omits the field)
+        is `pending` and retried until `due_tick` (the monitor's own `t + lag`) is at or
+        before `source_tick`, then final `no_labels`.  An empty or undersized inference
+        window is final `no_labels` at once: no label can ever realize it.
         """
         env = pull(self.base_url, self.inferences_path, {"tick": t})
         meta = window_metadata(env, t)
@@ -153,11 +154,11 @@ class LiveHttpMLAdapter:
         inf = env.get("records") or []
         if not inf:
             return self._realized_signals(
-                RealizedResult(None, None, "no_labels", reason="empty window"))
+                RealizedResult(None, None, "no_labels", reason="empty window", final=True))
         if len(inf) < self.chunk_size:
             # same rule as the live tick: no statistical metric below the window size
             return self._realized_signals(RealizedResult(
-                None, None, "no_labels",
+                None, None, "no_labels", final=True,
                 reason=f"insufficient sample: {len(inf)} of {self.chunk_size} records"))
         overdue = (source_tick is not None and due_tick is not None
                    and int(due_tick) <= int(source_tick))
@@ -171,9 +172,18 @@ class LiveHttpMLAdapter:
             return self._realized_signals(RealizedResult(None, 0.0, "pending", reason=str(exc)))
         joined = join_realized(inf, labels_env.get("records", []), id_field=self.id_field,
                                label_field=self._label_field, proba_field=self.proba_field)
-        available_at = labels_env.get("available_at_tick")
-        if available_at is not None and not labels_env.get("records"):
-            if source_tick is not None and int(available_at) <= int(source_tick):
+        if not labels_env.get("records"):
+            available_at = labels_env.get("available_at_tick")
+            if available_at is None:
+                # no producer due tick to go by: fall back to the monitor's own
+                if overdue:
+                    joined.status, joined.final = "no_labels", True
+                    joined.reason = (f"no labels published by tick {source_tick} "
+                                     f"(due at tick {due_tick}, producer gave no "
+                                     f"available_at_tick)")
+                else:
+                    joined.status, joined.reason = "pending", "label lag"
+            elif source_tick is not None and int(available_at) <= int(source_tick):
                 joined.status, joined.final = "no_labels", True
                 joined.reason = (f"no labels published by tick {source_tick} "
                                  f"(due at tick {available_at})")
