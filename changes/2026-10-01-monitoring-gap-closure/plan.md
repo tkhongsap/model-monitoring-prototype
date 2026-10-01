@@ -761,11 +761,33 @@ Per-use-case thresholds; LIME in production; §14 sampling policy; Alembic; Prom
   new `final` boolean column on `live_realized_metrics` (migration 5, back-filled from
   status) because `no_labels` also names the non-final "empty window" / "insufficient
   sample" outcomes; `REALIZED_FINAL_STATUSES` stays `{realized, evicted}` and
-  `ticks_needing_realization` filters on `final`. `current_tick` is the monitor's tick
-  (the observed tick after a commit, `read_tick` while waiting), not `latest_tick - 1`,
-  so finalization is never earlier than the spec's "current source tick". A 404 on the
+  `ticks_needing_realization` filters on `final`. (Corrected below: finality is judged
+  against the producer's source tick `latest_tick - 1`, passed as `source_tick`; the
+  monitor's `current_tick` only bounds the backfill window.) A 404 on the
   labels window alone (inferences still served) is `pending` and retried until the due
   tick has passed, then final `no_labels`; only the inference re-pull marks `evicted`.
   `label_backfill.run` also sweeps `pending` rows below the window (left by a producer
   outage) once more. The live tick's "labels pull failed" reason maps to `pending`
   rather than `error`, since it is transient and the backfill retries it.
+- B4 (review fix, second pass): the earlier bullet's claim that using the monitor's tick
+  "is never earlier than the spec's current source tick" was wrong while waiting at the
+  tail, where `read_tick == latest_tick` (the producer's still-open window) and the
+  source tick is `latest_tick - 1`. `_backfill_labels` now derives
+  `source_tick = latest_tick - 1` from `/telemetry/meta` (falling back to the monitor's
+  tick) and `label_backfill.run` forwards it to `realize_tick(..., source_tick=,
+  due_tick=)`, whose `available_at_tick <= source_tick` and `due_tick <= source_tick`
+  comparisons decide finality; `current_tick` only bounds the window. Tests
+  `test_overdue_tick_without_labels_is_final_no_labels`,
+  `test_pending_ticks_that_left_the_window_are_swept` and
+  `test_labels_404_after_due_tick_is_final_no_labels` were re-timed and now also assert
+  that a tick due at `latest_tick` stays `pending` while the monitor waits there.
+- B4 (review, minor): `realize_tick` returns `final=True` for `count=0` and undersized
+  inference windows (nothing can ever realize them, so they are not re-pulled for L+1
+  cycles), and an empty labels window that omits `available_at_tick` follows the 404
+  rule — `pending` ("label lag") until the monitor's `t + L` is at or before the source
+  tick, then final `no_labels` — instead of staying a non-final `no_labels` forever. The
+  `fake_producer` fixture gained `omit_available_at`.
+- Spec §B.2/§B.3 amended to match: the backfill window is `[t - L - 1, t)`, realized
+  values live only in `live_realized_metrics` (sparklines from `db.realized_history`),
+  and the flagged-concern row says so. `rollup_meta` stays in the detail payload's
+  pass-through keys (lane names and signal keys only; no raw data).

@@ -40,8 +40,9 @@ own "must do" and verification so a reader can stop after any of them.
    `count=0`, the runner stores an observation for the window with `record_count=0`, all
    signals `None` with reason `"empty window"`, Performance/Drift lanes Unknown, and the
    cursor advances. No `errors["telemetry"]`. Applies to churn (L01) and NBA (L03).
-2. **Label-lag backfill.** After observing tick *t*, the runner also attempts realized
-   metrics for every tick *u* in `[t - L, t)` that is persisted but not yet realized,
+2. **Label-lag backfill.** After observing tick *t* (and while waiting at the tail), the
+   runner also attempts realized metrics for every tick *u* in `[t - L - 1, t)` that is
+   persisted but not yet final,
    where *L* = `label_lag_ticks` (ML) or `reward_lag_ticks` (NBA) from `/telemetry/meta`,
    falling back to 3 when absent. For each *u* it pulls `/telemetry/labels?tick=u`
    (or `/telemetry/rewards`), joins on `inference_id` to the inferences re-pulled for *u*
@@ -49,11 +50,14 @@ own "must do" and verification so a reader can stop after any of them.
    `live_realized_metrics(source_id, tick, metric_key, value, coverage, status,
    computed_at)` with `status ∈ {realized, pending, insufficient_coverage, single_class,
    no_labels, evicted, error}`. A tick is "done" once `status == realized` or the label window reports
-   `available_at_tick` ≤ current source tick and still has no labels (then `no_labels`).
+   `available_at_tick` ≤ current source tick (the producer's latest closed tick,
+   `latest_tick - 1`) and still has no labels (then `no_labels`).
 3. **Immutability preserved.** `live_observations.payload` and its digest are never
-   rewritten. Realized metrics live only in the new table and in `live_signal_history`
-   rows keyed to the original `observation_id` with signal keys `realized_roc_auc` /
-   `acceptance_rate`.
+   rewritten. Realized metrics live only in the new table; realized sparklines for
+   `realized_roc_auc` / `acceptance_rate` are served from it (`db.realized_history`),
+   not from `live_signal_history`, whose `(observation_id, signal_key)` row already
+   holds the pending value stored with the observation. *(Amended during slice B
+   implementation; see plan Deviations.)*
 4. **Grading uses the latest realized value.** `/api/live/use-case/{uc}` and the
    portfolio rollup take `realized_roc_auc` (and NBA `acceptance_rate`) from the most
    recent tick with `status == realized`, label it `as_of_tick`, and grade it with the
@@ -175,7 +179,7 @@ DB), `backend/app/alert_delivery.py` (webhook), `backend/app/label_backfill.py`,
 | Concern | Raised by | Severity | Resolution | Accepted by |
 |---|---|---|---|---|
 | Backfill re-pulls inferences for old ticks; producers may evict windows (404). | spec author | Material | Treat 404 on backfill as `status=evicted`, never hold the cursor; surfaced in detail payload. | pending |
-| Re-grading an old tick could change history shown in sparklines. | spec author | Minor | Realized values append to `live_signal_history` only; existing rows are never updated. | pending |
+| Re-grading an old tick could change history shown in sparklines. | spec author | Minor | Realized values live only in `live_realized_metrics` and are read from there; `live_signal_history` rows are never updated or appended to by the backfill. | pending |
 | Webhook secret in logs. | spec author | Material | Log the host only; never the full URL or body. Test asserts it. | pending |
 | Slice E deletes the TS API stub that Replit's `artifact.toml` references by directory. | spec author | Material | Keep `artifacts/api-server/artifact.toml` and `package.json` with no `src`; verify `pnpm run typecheck` and `deploy-build.sh` still pass. | pending |
 | Two Autoscale instances could both run backfill. | spec author | Minor | Backfill runs inside the existing lease-held cycle; `live_realized_metrics` has a unique key on `(source_id, tick, metric_key)`. | pending |

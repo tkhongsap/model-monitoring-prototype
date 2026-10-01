@@ -79,9 +79,18 @@ depend on. The spec is
   window alone is `pending` (not `evicted`) until the due tick passes, and `pending` rows
   that slipped below the window during an outage are swept once more. Fast suite: 84
   passed, 9 deselected.
-- Remaining: an undersized (<500 record) window is never realized by the backfill (same
-  rule as the live tick; its row stays `no_labels` with an "insufficient sample" reason
-  and is re-pulled until it leaves the window). Slices C–E below.
+- Review fix (second pass): finality is judged against the producer's source tick
+  (`latest_tick - 1`), not the monitor's tick. While waiting at the tail the monitor's
+  tick equals the producer's still-open window, so the previous rule finalized
+  `no_labels` one tick early and, because final rows are immutable, lost labels published
+  later in that window. `label_backfill.run` takes `source_tick` and forwards it to
+  `realize_tick` for both the `available_at_tick` and the `due_tick` comparisons; the
+  monitor's tick now only bounds the window. Also: an empty labels window with no
+  `available_at_tick` follows the 404 rule (pending until `t + L` closes, then final
+  `no_labels`) instead of lingering as non-final `no_labels`, and `count=0` / undersized
+  inference windows are final at once so they are not re-pulled every cycle. Fast suite:
+  86 passed, 9 deselected.
+- Remaining: slices C–E below.
 
 ### 2026-10-01 — audit and playbook baseline
 

@@ -26,8 +26,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `live_realized_metrics` table (migrations 4 and 5), and the live use-case detail,
   portfolio and summary grade the Performance and Feedback lanes on the latest realized
   value with an `as_of_tick` (contract §7). A tick whose labels never arrive is final
-  `no_labels` once the producer's `available_at_tick` has passed. Stored observations are
-  never rewritten.
+  `no_labels` once the producer's `available_at_tick` is at or before its latest closed
+  tick (`latest_tick - 1`). Stored observations are never rewritten.
 - The Replit `postMerge` hook no longer runs `pnpm --filter db push`, which pushed an
   empty Drizzle schema at the backend's PostgreSQL database. It only reinstalls
   workspace dependencies; the backend migrates itself at startup.

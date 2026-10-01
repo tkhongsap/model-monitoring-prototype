@@ -55,11 +55,15 @@ against the stored observation, joins the labels and writes one row per
 `pending`, `insufficient_coverage` (below 50 %), `single_class`, `no_labels`, `evicted`
 (the inference window answered 404; final) or `error` (digest changed; retried). A tick
 is done (`final`) once it is `realized` or `evicted`, or once the labels window's
-`available_at_tick` is at or before the monitor's current tick and still carries no
-labels — then it is final `no_labels` and never pulled again, even if labels appear
-later. A 404 on the labels window alone is `pending` until the tick's own due tick
-(`t + L`) has passed. `pending` rows that slipped below the window during a producer
-outage are swept once more. Final rows are never overwritten, and the backfill never
+`available_at_tick` is at or before the producer's source tick — its latest closed tick,
+`latest_tick - 1`, never the open window it is still writing — and still carries no
+labels: then it is final `no_labels` and never pulled again, even if labels appear
+later. While the monitor waits at the tail its own tick equals the open window, so
+nothing due in that window is finalized until it closes. A 404 on the labels window,
+or an empty one without `available_at_tick`, is `pending` until the tick's own due tick
+(`t + L`) is at or before the source tick. A `count=0` or undersized inference window
+is final `no_labels` at once (no label can realize it). `pending` rows that slipped
+below the window during a producer outage are swept once more. Final rows are never overwritten, and the backfill never
 rewrites an observation or touches the cursor. `GET /api/live/use-case/{uc}` and the
 portfolio grade `realized_roc_auc` and `acceptance_rate` on the most recent `realized`
 tick, reported as `as_of_tick`; with no realized row the lane stays reasoned-Unknown with
