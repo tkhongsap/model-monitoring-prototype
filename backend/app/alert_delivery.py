@@ -4,7 +4,7 @@ Every opened and every resolved alert is POSTed once to ``LIVE_ALERT_WEBHOOK_URL
 JSON body ``{"text", "blocks", "alert"}`` — Slack incoming-webhook compatible and plain
 enough for any generic receiver.  Delivery is at-least-once: a failed attempt is recorded
 on the alert row (``*_delivery_status = "error"``) and retried on the next poll cycle;
-until slice D lands the retry policy is one attempt per cycle.  Delivery never blocks
+each attempt itself retries with backoff (``http_retry``, spec D.1).  Delivery never blocks
 grading: ``deliver_pending`` swallows every error and the poller calls it last.
 
 Redaction: the payload carries use case id, lane, health, tick and the dashboard URL —
@@ -19,6 +19,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from . import config, db
+from .http_retry import request_with_retry
 
 log = logging.getLogger(__name__)
 
@@ -28,8 +29,15 @@ NOT_CONFIGURED = "LIVE_ALERT_WEBHOOK_URL not configured"
 _PHASES = (("open", "open_delivery_status"), ("resolve", "resolve_delivery_status"))
 
 
+def _send_post(method: str, url: str, **kwargs) -> httpx.Response:
+    return httpx.post(url, **kwargs)
+
+
 def _default_post(url: str, *, json: dict, timeout: float):
-    return httpx.post(url, json=json, timeout=timeout)
+    """One delivery with the slice-D retry policy (429/502/503/504, connection errors);
+    an exhausted retryable status comes back as the last response and is recorded as a
+    delivery error, so the next cycle retries again (at-least-once)."""
+    return request_with_retry("POST", url, json=json, timeout=timeout, send=_send_post)
 
 
 def _dashboard_url(source_id: str) -> str | None:

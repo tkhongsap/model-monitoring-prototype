@@ -16,6 +16,8 @@ import json
 
 import httpx
 
+from ..http_retry import request_with_retry
+
 
 class TelemetryIntegrityError(RuntimeError):
     """Producer metadata does not match the exact public records on the wire."""
@@ -43,6 +45,27 @@ def _auth_headers() -> dict:
     return {"Authorization": f"Bearer {token}"} if token else {}
 
 
+def _send_get(method: str, url: str, **kwargs) -> httpx.Response:
+    """One GET attempt through this module's ``httpx`` (the seam tests monkeypatch)."""
+    return httpx.get(url, **kwargs)
+
+
+def _send_post(method: str, url: str, **kwargs) -> httpx.Response:
+    """One POST attempt through this module's ``httpx`` (the seam tests monkeypatch)."""
+    return httpx.post(url, **kwargs)
+
+
+def _get(url: str, **kwargs) -> httpx.Response:
+    """GET with the contract §12 retry policy (429/502/503/504, connection errors)."""
+    return request_with_retry("GET", url, send=_send_get, **kwargs)
+
+
+def _post(url: str, **kwargs) -> httpx.Response:
+    """POST with the same retry policy; acks and score write-back are idempotent on
+    the producer side (keyed by window / trace id), so a retried POST is safe."""
+    return request_with_retry("POST", url, send=_send_post, **kwargs)
+
+
 def _split_header(value: str | None) -> list[str] | None:
     """Comma-split a header into a list; missing/empty -> None (caller falls back)."""
     items = [s.strip() for s in (value or "").split(",") if s.strip()]
@@ -52,8 +75,8 @@ def _split_header(value: str | None) -> list[str] | None:
 def pull(base_url: str, path: str, params: dict | None = None, timeout: float = 30.0) -> dict:
     """GET a telemetry Window envelope: {contract_version, window, from_tick, to_tick,
     count, records, ...}."""
-    r = httpx.get(base_url.rstrip("/") + path, params=params, timeout=timeout,
-                  headers=_auth_headers())
+    r = _get(base_url.rstrip("/") + path, params=params, timeout=timeout,
+             headers=_auth_headers())
     if r.status_code == 404:
         tick = params.get("tick") if params else None
         raise WindowEvicted(f"{path} tick={'?' if tick is None else tick} not available (404)")
@@ -66,8 +89,8 @@ def pull_meta(base_url: str, timeout: float = 10.0, *, strict: bool = False) -> 
     feature_order, categorical_features, ...}. Best-effort: {} on any failure (callers
     use it for cursor sync / feature ownership, never as a hard dependency)."""
     try:
-        r = httpx.get(base_url.rstrip("/") + "/telemetry/meta", timeout=timeout,
-                      headers=_auth_headers())
+        r = _get(base_url.rstrip("/") + "/telemetry/meta", timeout=timeout,
+                 headers=_auth_headers())
         r.raise_for_status()
         return r.json()
     except Exception:  # noqa: BLE001 — callers choose advisory vs required semantics
@@ -78,8 +101,8 @@ def pull_meta(base_url: str, timeout: float = 10.0, *, strict: bool = False) -> 
 
 def pull_build_version(base_url: str, timeout: float = 5.0) -> dict:
     """Read the producer gateway's public build identity for deploy reconciliation."""
-    r = httpx.get(base_url.rstrip("/") + "/build/version", timeout=timeout,
-                  headers=_auth_headers())
+    r = _get(base_url.rstrip("/") + "/build/version", timeout=timeout,
+             headers=_auth_headers())
     r.raise_for_status()
     return r.json()
 
@@ -155,7 +178,7 @@ def pull_model(base_url: str, path: str = "/model/artifact", timeout: float = 60
     (safe sklearn (de)serialization) or sign the artifact.
     """
     import joblib
-    r = httpx.get(base_url.rstrip("/") + path, timeout=timeout, headers=_auth_headers())
+    r = _get(base_url.rstrip("/") + path, timeout=timeout, headers=_auth_headers())
     r.raise_for_status()
     model = joblib.load(io.BytesIO(r.content))
     version = int(r.headers.get("X-Model-Version", "1"))
@@ -172,7 +195,7 @@ def push_scores(base_url: str, scores: list[dict], timeout: float = 10.0) -> dic
 
     scores: [{"trace_id": str, "name": str, "value": float, "comment"?: str}, ...]
     Returns the response JSON on success. Raises on HTTP/network error (caller degrades)."""
-    r = httpx.post(
+    r = _post(
         base_url.rstrip("/") + "/telemetry/scores",
         json={"scores": scores},
         headers={**_auth_headers(), "Content-Type": "application/json"},
@@ -190,7 +213,7 @@ def push_scores(base_url: str, scores: list[dict], timeout: float = 10.0) -> dic
 def acknowledge_observation(base_url: str, *, window_id: str, observation_id: str,
                             content_sha256: str, timeout: float = 10.0) -> dict:
     """Best-effort durable monitor acknowledgement to the producer portfolio gateway."""
-    r = httpx.post(
+    r = _post(
         base_url.rstrip("/") + "/api/sync/observed",
         json={"window_id": window_id, "observation_id": observation_id,
               "content_sha256": content_sha256},
