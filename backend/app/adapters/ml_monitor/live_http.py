@@ -29,6 +29,7 @@ from ...datagen import churn
 from ..base import LaneResult, TickContext
 from ..telemetry_http import pull, pull_model, window_metadata
 from . import engines
+from .realized import join_realized
 
 
 class LiveHttpMLAdapter:
@@ -120,6 +121,9 @@ class LiveHttpMLAdapter:
                 coverage: float | None, pending: str | None, t: int) -> None:
         """Hook for subclass signals over the same pulled windows (NBA adds two)."""
 
+    def _on_empty_window(self, res: LaneResult, t: int) -> None:
+        """Subclass hook for a count=0 window (NBA marks its extra signals pending)."""
+
     def monitor(self, use_case_id: str, tick: TickContext) -> LaneResult:
         res = LaneResult()
         t = tick.tick
@@ -140,9 +144,20 @@ class LiveHttpMLAdapter:
             inf = inference_env["records"]
             res.metadata.update(window_metadata(inference_env, t))
             if not inf:
+                # Contract §6: a closed window with count=0 is a REAL observation (the
+                # producer saw no traffic), distinct from a missing window (404). It is
+                # stored with every signal Unknown and the cursor advances; it must never
+                # surface as errors["telemetry"], which holds the cursor.
                 for k in self._signal_keys:
                     res.signals[k] = None
-                res.errors["telemetry"] = "empty window (count=0)"
+                res.errors["empty_window"] = "count=0"
+                res.records = {
+                    "drifted_features": [], "reference_auc": self._reference_auc,
+                    "model_version": self._version, "empty_window": True,
+                    "realized_pending_reason": "empty window",
+                    "realized_label_coverage": None, "realized_window_tick": t,
+                }
+                self._on_empty_window(res, t)
                 return res
             order = self._resolve_order(inf)
             cur_feat = pd.DataFrame([r["features"] for r in inf])[order]
@@ -200,23 +215,14 @@ class LiveHttpMLAdapter:
         realized, pending, coverage, matched = None, None, None, []
         try:
             env = pull(self.base_url, self.labels_path, {"tick": t})
-            labels = env.get("records", [])
-            if env.get("available_at_tick") is not None:
+            if env.get("available_at_tick") is not None and not env.get("records"):
                 pending = "label lag"           # window not yet released by the app
-            elif not labels:
-                pending = "label lag"           # nothing arrived yet
             else:
-                lab = {label[self.id_field]: int(label[self._label_field]) for label in labels}
-                pairs = [(lab[r[self.id_field]], p) for r, p in zip(inf, cur_proba)
-                         if r[self.id_field] in lab]
-                matched = [y for y, _ in pairs]
-                coverage = len(pairs) / len(inf) if inf else 0.0
-                if coverage < 0.5:
-                    pending = "label coverage below 50%"
-                elif len(set(matched)) < 2:
-                    pending = "single class in matched labels"
-                else:
-                    realized = float(roc_auc_score(matched, [p for _, p in pairs]))
+                joined = join_realized(inf, env.get("records", []), id_field=self.id_field,
+                                       label_field=self._label_field,
+                                       proba_field=self.proba_field)
+                realized, coverage, matched = joined.value, joined.coverage, joined.matched
+                pending = None if joined.status == "realized" else (joined.reason or joined.status)
         except Exception as e:  # noqa: BLE001
             pending = f"labels pull failed: {type(e).__name__}: {e}"
         res.signals["realized_roc_auc"] = realized

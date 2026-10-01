@@ -44,6 +44,7 @@ _EXTRA_KEYS = (
     "lane_reasons", "window_id", "source_instance_id", "opened_at", "closed_at",
     "content_sha256", "first_record_id", "last_record_id", "provenance_counts",
     "record_count", "source_lag_ms", "observation_id", "ack_status", "ack_error",
+    "empty_window",
 )
 
 

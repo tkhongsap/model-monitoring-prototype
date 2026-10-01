@@ -54,6 +54,14 @@ class LiveHttpNBAAdapter(LiveHttpMLAdapter):
     def _on_rebaseline(self) -> None:
         self._baseline_mix = None   # re-capture from the first window of the new model
 
+    def _on_empty_window(self, res: LaneResult, t: int) -> None:
+        # No recommendations were served: the Feedback lane and the mix drift are
+        # reasoned-Unknown for this window (the runner excludes them from the rollup).
+        res.errors["acceptance_pending"] = "empty window"
+        res.errors["recommendation_drift_pending"] = "empty window"
+        res.records["offer_mix"] = None
+        res.records["baseline_offer_mix"] = self._baseline_mix
+
     def _extend(self, res: LaneResult, inf: list, matched: list,
                 coverage: float | None, pending: str | None, t: int) -> None:
         # --- acceptance_rate over the matched rewards subset (pending like realized) ---

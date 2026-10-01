@@ -47,6 +47,9 @@ _EXCLUDED_LANES_LLM = set(_HAND_SET_LLM)
 # while rewards lag it is reasoned-Unknown and excluded, once arrived it COUNTS.
 _HAND_SET_NBA = {"Safety & security": "Unknown", "Reliability": "Unknown"}
 
+# windows with nothing (or too little) to explain: skip LIME/SHAP, keep the observation
+_NO_EXPLAIN = {"insufficient_sample", "empty_window"}
+
 
 def _source_lag_ms(closed_at: str | None) -> float | None:
     if not closed_at:
@@ -235,6 +238,7 @@ class LiveRunner:
             "model_version": records.get("model_version"),
             "realized_pending_reason": pending,
             "realized_label_coverage": records.get("realized_label_coverage"),
+            **({"empty_window": True} if records.get("empty_window") else {}),
             "lime_top": ex_res.lime_top, "lime_instance": ex_res.instance,
             "artifacts": {**ml_res.artifacts, **ex_res.artifacts},
             "errors": {**ml_res.errors, **ex_res.errors},
@@ -251,7 +255,7 @@ class LiveRunner:
                 return waiting  # don't advance, don't store as _current
             ctx = TickContext(tick=t, seed=self.seed, scenario_id="LIVE")
             ml_res = self.ml.monitor(LIVE_UC, ctx)
-            ex_res = (ExplainResult() if "insufficient_sample" in ml_res.errors
+            ex_res = (ExplainResult() if _NO_EXPLAIN & ml_res.errors.keys()
                       else self.explain.explain(LIVE_UC, ctx))
             payload = self._grade(ml_res, ex_res, t)
             return _commit_tick(self, payload, ml_res.errors.get("telemetry"), meta)
@@ -392,6 +396,7 @@ class LiveNBARunner:
             "acceptance_pending_reason": acc_pending,
             "offer_mix": records.get("offer_mix"),
             "baseline_offer_mix": records.get("baseline_offer_mix"),
+            **({"empty_window": True} if records.get("empty_window") else {}),
             "lime_top": ex_res.lime_top, "lime_instance": ex_res.instance,
             "artifacts": {**ml_res.artifacts, **ex_res.artifacts},
             "errors": {**ml_res.errors, **ex_res.errors},
@@ -407,7 +412,7 @@ class LiveNBARunner:
                 return waiting
             ctx = TickContext(tick=t, seed=self.seed, scenario_id="LIVE")
             ml_res = self.ml.monitor(LIVE_NBA_UC, ctx)
-            ex_res = (ExplainResult() if "insufficient_sample" in ml_res.errors
+            ex_res = (ExplainResult() if _NO_EXPLAIN & ml_res.errors.keys()
                       else self.explain.explain(LIVE_NBA_UC, ctx))
             payload = self._grade(ml_res, ex_res, t)
             return _commit_tick(self, payload, ml_res.errors.get("telemetry"), meta)
