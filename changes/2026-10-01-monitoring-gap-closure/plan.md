@@ -821,3 +821,32 @@ Per-use-case thresholds; LIME in production; §14 sampling policy; Alembic; Prom
   `pnpm run check:strict-live` were attempted on this macOS host and fail on the missing
   `@rollup/rollup-darwin-arm64` (the documented limitation); only `pnpm run typecheck`
   ran locally.
+- D1: `request_with_retry` takes a `send(method, url, **kwargs)` callable (default
+  `client.request` or `httpx.request`) and `telemetry_http` / `alert_delivery` pass one
+  that calls their module-level `httpx.get` / `httpx.post`, so the existing
+  `monkeypatch.setattr(telemetry_http.httpx, "post", …)` seams still intercept. When the
+  retryable statuses are exhausted the LAST RESPONSE is returned (not raised) so callers
+  keep their own status handling (`pull`'s 404 → `WindowEvicted`, `raise_for_status`,
+  the webhook's `status_code >= 400`); only exhausted transport errors raise. `sleep`
+  and `rng` default to `None` and resolve to `time.sleep` / `random.random` per call so
+  tests can patch them through the module. A fake response without `status_code` (the
+  hardening test's stub) is treated as non-retryable.
+- D2: the per-cycle record is `last_cycle = {cycle_id, started_at, finished_at,
+  duration_ms, outcome, backlog, sources: {uc: {tick, duration_ms, outcome, backlog,
+  error}}}` with outcomes `ok` / `waiting` / `held` / `error` (and `lease_lost` for the
+  cycle); readiness nests it under `poller.last_cycle` rather than at the top level.
+  `main.py` also replaces the configuration-blocked `print` with `log.error`.
+- D3: the skip route marks the skipped tick's realized rows final `no_labels` (via the
+  new `live_runner.realized_keys_for(uc)`) so the backfill never re-pulls the poisoned
+  window; `skipped` / `skip_reason` were added to the detail view's pass-through keys so
+  the stub is auditable from the API; a blank reason is 422; the stub also records the
+  held error as `skipped_error` and sets `backlog - 1` / `catching_up|at_tail` so the
+  cursor row is consistent until the next contact. `abandon_live_acks` sets
+  `ack_status = "abandoned"` (a new value, excluded from `list_live_acks_to_retry`).
+- D4: `LiveHttpNBAAdapter.__init__` cannot read the baseline (the model version is
+  unknown until `_ensure_baseline` runs), so the cold-start read happens lazily in
+  `_on_rebaseline` and, once per version, in `_extend` before a capture
+  (`_baseline_loaded_for` guards the lookup). Database failures on read or write log a
+  warning and degrade to the in-memory mix; `clear_live_state` also clears
+  `live_baselines`. The restart test changes the served mix between the two adapter
+  instances so a re-capture cannot pass it.

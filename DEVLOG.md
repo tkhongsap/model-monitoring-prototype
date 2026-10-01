@@ -38,13 +38,63 @@ depend on. The spec is
 1. Slice A — playbook baseline and `postMerge` fix: merged (#9).
 2. Slice B — monitoring correctness (`count=0` observation, label-lag backfill): merged
    (#10).
-3. Slice C — alerting (transition state machine, API, webhook, UI, ADR 0001): in
-   progress (this branch, `feat/live-alerting`).
+3. Slice C — alerting (transition state machine, API, webhook, UI, ADR 0001): merged
+   (#11).
 4. Slice D — operational resilience (HTTP retry, structured logging, operator skip, NBA
-   baseline persistence): not started.
+   baseline persistence): in progress (this branch, `feat/live-resilience`).
 5. Slice E — repository hygiene and contract strictness: not started.
 
 ## Work log
+
+### 2026-10-01 — live resilience: retry, logging, operator skip, baseline persistence (slice D)
+
+- Changed: new `backend/app/http_retry.py` (`request_with_retry`: three attempts on
+  429/502/503/504 and `httpx.TransportError`, backoff 0.5 s → 4 s with ±25 % jitter,
+  `Retry-After` honoured and capped, other statuses returned at once, the last response
+  returned when retryable statuses are exhausted); `telemetry_http` (`pull`,
+  `pull_meta`, `pull_build_version`, `pull_model`, `push_scores`,
+  `acknowledge_observation`) and `alert_delivery._default_post` go through it via a
+  `send` callable that still calls the module-level `httpx.get` / `httpx.post`. New
+  `backend/app/logging_setup.py` (`configure`: JSON lines when `LOG_FORMAT=json`, plain
+  otherwise, idempotent); `main.py` configures it and its startup `print`s are log
+  calls; `LivePoller.last_cycle` records cycle id, timing, outcome, backlog and per-source
+  tick/duration/outcome/error, logged as one structured line per source and exposed by
+  `/api/readiness` under `poller.last_cycle`. New `db.skip_live_tick` (`NothingToSkip`
+  unless the cursor state is `error`; stub observation through `put_live_observation`)
+  and `db.abandon_live_acks`; `POST /api/live/sources/{uc}/skip` and `/reset-ack` on the
+  strict router behind the worker token; the strict-live middleware allows POST only for
+  `/api/live/poll` and `/api/live/sources/*`; `realized_keys_for(uc)` lets the skip route
+  mark the tick's realized rows final; the detail view passes `skipped` / `skip_reason`
+  through. New `live_baselines` table (migration 7) with `put_baseline` / `get_baseline`;
+  `LiveHttpNBAAdapter` stores the captured offer mix per model version and reads it back
+  on cold start and rebaseline. Docs: CHANGELOG, README, `docs/STRICT-LIVE.md`
+  ("Unsticking a source", retry policy, cycle logs, baselines).
+- Evidence: from `backend/`, `.venv/bin/python -m pytest -q -m "not slow"` → 141 passed,
+  9 deselected (112 before this slice). New tests: `test_http_retry.py` (429 with
+  `Retry-After`, cap, 503 ×2 then 200 with exact backoff, jitter bound, connection errors
+  retried then raised, 404 not retried, exhaustion returns the last response, `pull` /
+  `acknowledge_observation` / the webhook default go through the policy and the `httpx`
+  monkeypatch seam still intercepts), `test_poller_metrics.py` (per-source `ok` /
+  `waiting` / `held` / `error` outcomes, structured log fields, JSON formatter,
+  idempotent `configure`, readiness `last_cycle`), `test_operator_routes.py`
+  (`test_skip_requires_held_cursor` → 409 and no cursor movement, 401 without the token,
+  stub observation audited and realized rows final, 422 on a blank reason, 404 unknown
+  use case, reset-ack abandons only the named source's acks, every other POST under
+  `/api/live/` is 404), `test_nba_baseline.py` (capture persists; a second adapter
+  instance measures drift 0.4 against the stored baseline instead of re-capturing a
+  shifted mix — the test fails when the cold-start read is disabled; keyed by model
+  version; rebaseline reloads; `clear_live_state` drops; migration 7 recorded). No file
+  under `artifacts/`, `scripts/`, `lib/` or the workspace manifests changed, so the pnpm
+  checks were not rerun. Unavailable: real producer, Langfuse, live Claude judge, a real
+  webhook receiver.
+- Learned: a default argument bound to `time.sleep` cannot be monkeypatched through the
+  module, so `request_with_retry` resolves `sleep` / `rng` per call (the first version
+  of the retry test slept for real and still passed). A restart test must change what
+  the producer serves between the two instances, or re-capturing the baseline passes it
+  vacuously. The skip stub becomes the newest observation, so the detail view, portfolio
+  summary and alert evaluation have to render it: `signals: {}` and all-Unknown lanes
+  do, and Unknown never opens an alert.
+- Remaining: slice E below.
 
 ### 2026-10-01 — live alerting: state machine, webhook, API, UI (slice C)
 
@@ -157,16 +207,6 @@ depend on. The spec is
 
 ## Known gaps
 
-- No HTTP retry or backoff (contract §12): `backend/app/adapters/telemetry_http.py` uses
-  a single `httpx.get`; 429/503 and connection errors hold the cursor until the next
-  cycle. Impact: transient producer errors look like outages. Webhook delivery likewise
-  makes one attempt per poll cycle. Trigger: slice D.
-- No operator path for a held cursor: `db.clear_live_state` is not routed; a poisoned
-  window needs a database session. Trigger: slice D.
-- Poller observability is `print`; readiness does not expose cycle duration or outcome.
-  Trigger: slice D.
-- NBA baseline offer mix lives in process memory and is lost on Autoscale restart, so
-  `recommendation_drift` is pending after every cold start. Trigger: slice D.
 - Dead scaffold remains (`.migration-backup/`, `lib/`, `artifacts/api-server/src`,
   `artifacts/mockup-sandbox`, `backend/fly.toml`, `backend/Dockerfile`,
   `scripts/src/hello.ts`, unused npm dependencies). Impact: misleading to new readers and

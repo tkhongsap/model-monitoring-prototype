@@ -10,6 +10,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- Operational resilience (spec D). Producer pulls, acknowledgements, score write-back
+  and the alert webhook retry on 429/502/503/504 and connection errors: three attempts,
+  exponential backoff 0.5 s → 4 s with jitter, `Retry-After` honoured; other 4xx are
+  never retried (`backend/app/http_retry.py`, contract §12).
+- Structured logging: `LOG_FORMAT=json` emits one JSON object per line; every poll
+  cycle logs `cycle_id, source_id, tick, duration_ms, outcome, backlog` per source, and
+  `GET /api/readiness` exposes the last cycle (duration, outcome, last error per source)
+  under `poller.last_cycle`. Startup `print`s are gone.
+- Operator unstick: `POST /api/live/sources/{uc}/skip` (worker token, `{"reason"}`)
+  skips the tick a source is held on — only when the cursor state is `error` (409
+  otherwise) — writing an auditable stub observation (`record_count=0`, `skipped=true`,
+  reason) and advancing the cursor; `POST /api/live/sources/{uc}/reset-ack` abandons a
+  poisoned pending acknowledgement. Every other POST under `/api/live/` is still 404.
+  Runbook: `docs/STRICT-LIVE.md` "Unsticking a source".
+- The NBA baseline offer mix is persisted per `(source, model_version)` in the new
+  `live_baselines` table (migration 7) and read on cold start, so
+  `recommendation_drift` survives Autoscale restarts.
 - Live alerting (spec C). After every poll cycle each use case's graded health
   (including lagged realized metrics) is diffed against its last snapshot: `* → Red` and
   `Green → Amber` open an alert, a return to Green resolves it, a current Unknown never

@@ -111,15 +111,23 @@ Layout: `backend/app/engines/` are pure functions, `backend/app/adapters/` do I/
   reinstalls dependencies. Replit-specific notes are in [replit.md](replit.md).
 - Running identity: `GET /api/version` reports `build_sha` (the deployed Git commit),
   `contract_version`, and the producer gateway SHA.
-- Monitoring: `GET /api/readiness` (database, poller, judge, configuration),
+- Monitoring: `GET /api/readiness` (database, poller, judge, configuration and the last
+  poll cycle's duration, outcome and per-source error under `poller.last_cycle`),
   `GET /api/live/sync` (per-source cursor state) and `GET /api/live/alerts?open=true`
   (open health-transition alerts with their delivery status).
   `.github/workflows/autoscale-poll.yml` wakes the Autoscale deployment every five
   minutes with the worker token.
 - Optional environment: `LIVE_ALERT_WEBHOOK_URL` (Slack incoming webhook or any JSON
-  receiver; a secret — never logged beyond its host, never in the bundle) and
-  `LIVE_DASHBOARD_URL` (public SPA origin linked from each notification). Without the
+  receiver; a secret — never logged beyond its host, never in the bundle),
+  `LIVE_DASHBOARD_URL` (public SPA origin linked from each notification) and
+  `LOG_FORMAT` (`json` for one JSON object per log line, default plain text). Without the
   webhook, alerts are still recorded and shown; delivery is marked `skipped`.
+- Operator endpoints (worker token, the only mutating surface besides the poll):
+  `POST /api/live/sources/{uc}/skip` with `{"reason": "..."}` skips the tick a source is
+  held on (409 unless the cursor state is `error`) and leaves an auditable stub
+  observation; `POST /api/live/sources/{uc}/reset-ack` abandons a poisoned pending
+  acknowledgement. Steps and `curl` commands: [docs/STRICT-LIVE.md](docs/STRICT-LIVE.md)
+  "Unsticking a source".
 - Runbook and rollback: redeploy the previous Replit revision; migrations are additive.
   Demo runbook: [docs/LIVE-DEMO.md](docs/LIVE-DEMO.md).
 - Incident path: none yet (pilot); see [DEVLOG.md](DEVLOG.md) Known gaps.
@@ -147,9 +155,11 @@ Layout: `backend/app/engines/` are pure functions, `backend/app/adapters/` do I/
   below 500 records is never realized, and a window the producer evicts (404) before its
   labels arrive stays `evicted`.
 - Alerts are advisory and read-only: no acknowledge workflow, SLA timer, paging or
-  escalation; one webhook channel, one delivery attempt per poll cycle (a failed POST is
-  retried next cycle, never lost). Triage belongs to the RAI team (ADR 0001).
-- Producer HTTP calls have no retry or backoff; a stuck cursor has no operator endpoint.
+  escalation; one webhook channel, one delivery per poll cycle (each with retry and
+  backoff; a failed delivery is retried next cycle, never lost). Triage belongs to the
+  RAI team (ADR 0001).
+- No metrics export (Prometheus) or tracing; cycle metrics are logs plus
+  `GET /api/readiness`. The CBPE baseline is refit from the artifact after a restart.
 - LIME per-instance explanations are off in production; the sampling policy is uniform
   (contract §14).
 - `pnpm run build:live` cannot run on macOS because non-Linux native binaries are
