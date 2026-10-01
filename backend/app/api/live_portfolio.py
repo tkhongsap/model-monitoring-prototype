@@ -176,8 +176,17 @@ def portfolio_summary() -> dict:
     sync = portfolio_sync(LIVE_UCS)
     return {"use_case_count": 3, "as_of": as_of,
             "overall_counts": overall_counts, "lane_counts": lane_counts,
+            "open_alerts": open_alert_counts(),
             "sync_state": sync["sync_state"], "state": sync["state"],
             "backlog": sync["backlog"], "sync_sources": sync["sources"]}
+
+
+def open_alert_counts() -> dict[str, int]:
+    """Open alerts across the portfolio by severity (spec C.4 home strip)."""
+    counts = {"Red": 0, "Amber": 0}
+    for row in db.list_alerts(open_only=True, limit=500):
+        counts[row["to_health"]] = counts.get(row["to_health"], 0) + 1
+    return counts
 
 
 def record(uc: str, state: dict) -> None:
@@ -204,7 +213,7 @@ def detail(uc: str) -> dict | None:
             "lanes": {lane: "Unknown" for lane in LANES},
             "artifacts": {},
             "errors": ({"telemetry": sync["last_error"]} if sync.get("last_error") else {}),
-            "actions": [],
+            "alerts": db.list_alerts(uc, open_only=True, limit=20),
             "mode": "live",
             "tick": None,
             "waiting": True,
@@ -249,7 +258,8 @@ def detail(uc: str) -> dict | None:
         "last_observed_lanes": s.get("lanes", {}),
         "artifacts": s.get("artifacts", {}),
         "errors": s.get("errors", {}),
-        "actions": [],
+        # open health-transition alerts (spec C.2) replace the demo plane's action queue
+        "alerts": db.list_alerts(uc, open_only=True, limit=20),
         "mode": "live",
         "tick": s.get("tick"),
         "waiting": False,

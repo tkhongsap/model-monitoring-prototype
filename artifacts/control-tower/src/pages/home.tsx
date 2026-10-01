@@ -1,4 +1,5 @@
 import { useRouter } from "@/lib/nav";
+import { AlertsStrip } from "@/components/alerts";
 import { HealthChip, Section, StatCard, TierBadge } from "@/components/ui";
 import {
   formatAge,
@@ -48,6 +49,8 @@ export default function AtAGlance() {
           <StatCard value={counts.Unknown ?? 0} label="Unknown" accent="#6B7280" />
         </div>
       </Section>
+
+      <AlertsStrip />
 
       <Section title="Source → monitor pipeline">
         <div className="grid gap-3 xl:grid-cols-3">

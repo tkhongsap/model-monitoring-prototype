@@ -47,11 +47,39 @@ export interface LiveRow extends SyncSnapshot {
   stale?: boolean;
 }
 
+/** One persisted health-transition alert (GET /api/live/alerts). Derived
+ * metadata only: the worker opens and resolves rows; the browser reads. */
+export interface LiveAlert {
+  alert_id: string;
+  source_id: string;
+  lane: string;
+  from_health: Health | null;
+  to_health: Health;
+  tick: number | null;
+  observation_id: string | null;
+  opened_at: number;
+  resolved_at: number | null;
+  resolved_tick: number | null;
+  open_delivery_status: "pending" | "delivered" | "error" | "skipped" | string;
+  open_delivery_error: string | null;
+  open_delivered_at: number | null;
+  resolve_delivery_status: "n/a" | "pending" | "delivered" | "error" | "skipped" | string;
+  resolve_delivery_error: string | null;
+  resolve_delivered_at: number | null;
+}
+
+export interface LiveAlertList {
+  contract_version: string;
+  redacted: boolean;
+  rows: LiveAlert[];
+}
+
 export interface LiveSummary {
   use_case_count: number;
   as_of: Record<string, number | null>;
   overall_counts: Record<string, number>;
   lane_counts: Record<string, Record<string, number>>;
+  open_alerts?: Record<string, number>;
   rows: LiveRow[];
   sync_state?: SyncStateName | SyncSnapshot;
   state?: SyncStateName;

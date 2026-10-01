@@ -90,6 +90,19 @@ def observations(uc: str | None = None, limit: int = 100):
     return {"contract_version": "1.1", "redacted": True, "rows": rows}
 
 
+@router.get("/live/alerts")
+def alerts(uc: str | None = None, open: bool = False, limit: int = 50):
+    """Health-transition alerts (spec C.2): derived columns only, newest first.
+
+    Read-only, like every browser-facing live route; the worker owns opening and
+    resolving. The webhook URL is never part of a row.
+    """
+    if uc is not None and uc not in live_portfolio.LIVE_UCS:
+        raise HTTPException(404, detail=f"unknown live use case {uc}")
+    rows = db.list_alerts(uc, open_only=open, limit=max(1, min(limit, 500)))
+    return {"contract_version": "1.1", "redacted": True, "rows": rows}
+
+
 @router.get("/live/artifacts/{artifact_id}")
 def artifact(artifact_id: str):
     meta = db.get_artifact(artifact_id)

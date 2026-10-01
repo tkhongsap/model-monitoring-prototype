@@ -536,6 +536,13 @@ def live_observations(uc: str | None = None, limit: int = 100):
     return {"contract_version": "1.1", "rows": rows}
 
 
+@router.get("/live/alerts")
+def live_alerts(uc: str | None = None, open: bool = False, limit: int = 50):
+    """Same read-only alert listing as the strict router (the dev SPA fetches it)."""
+    from .live_routes import alerts
+    return alerts(uc, open, limit)
+
+
 @router.get("/live/artifacts/{artifact_id}")
 def live_artifact(artifact_id: str):
     meta = db.get_artifact(artifact_id)

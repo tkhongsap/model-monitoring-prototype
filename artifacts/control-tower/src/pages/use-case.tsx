@@ -5,6 +5,7 @@ import { useState } from "react";
 import {
   CartesianGrid, Legend as RLegend, Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
+import { AlertsPanel } from "@/components/alerts";
 import { CadenceBadge, GreyChip, HealthChip, ScrollBox, Td, Th, TierBadge } from "@/components/ui";
 import {
   formatAge,
@@ -87,6 +88,8 @@ export default function UseCase() {
           <dt className="font-semibold text-slate-500">Source → monitor lag</dt><dd className="font-mono">{formatLag(sync.source_lag_ms)}</dd>
         </dl>
       </div>
+
+      <AlertsPanel uc={uc.registry_id ?? id ?? ""} />
 
       {/* signals */}
       <ScrollBox>

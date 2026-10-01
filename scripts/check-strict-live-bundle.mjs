@@ -15,6 +15,7 @@ const forbidden = [
   ["DEMO-FULL", "baked scenario identifier"],
   ["stub-portfolio", "generated portfolio fixture"],
   ["baked timeline", "generated action timeline copy"],
+  ["LIVE_ALERT_WEBHOOK_URL", "alert webhook secret name"],
 ];
 
 async function filesUnder(directory) {
