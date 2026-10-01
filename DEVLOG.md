@@ -72,11 +72,16 @@ depend on. The spec is
   tests `estimated_roc_auc` is unmeasured (no model artifact) and is not a reasoned
   exclusion, so the Quality lane stays Unknown even when the realized AUC is Green — the
   rollup is doing what it should.
+- Review fix: the spec's "`available_at_tick` ≤ current tick with no labels ⇒ final
+  `no_labels`" rule is now implemented rather than approximated. Migration 5 adds a
+  `final` flag to `live_realized_metrics` (set for `realized`, `evicted`, and overdue
+  `no_labels`); `realize_tick` takes `current_tick` / `due_tick`, a 404 on the labels
+  window alone is `pending` (not `evicted`) until the due tick passes, and `pending` rows
+  that slipped below the window during an outage are swept once more. Fast suite: 84
+  passed, 9 deselected.
 - Remaining: an undersized (<500 record) window is never realized by the backfill (same
-  rule as the live tick; its row stays `no_labels` with an "insufficient sample" reason).
-  The spec's "`available_at_tick` ≤ current tick with no labels ⇒ final `no_labels`" rule
-  is approximated by the bounded window: a tick leaves the backfill window after
-  `L + 1` ticks and its last status stands. Slices C–E below.
+  rule as the live tick; its row stays `no_labels` with an "insufficient sample" reason
+  and is re-pulled until it leaves the window). Slices C–E below.
 
 ### 2026-10-01 — audit and playbook baseline
 

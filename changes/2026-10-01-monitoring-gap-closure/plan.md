@@ -755,3 +755,17 @@ Per-use-case thresholds; LIME in production; §14 sampling policy; Alembic; Prom
   rollup); detail signals gain `as_of_tick` and `coverage`, and the payload gains
   `realized_as_of_tick` / `acceptance_as_of_tick`. For observations stored before
   `rollup_meta` existed the view reconstructs the hand-set lanes from `lane_reasons`.
+- B4 (review fix, spec §B.2 "done" rule): the plan's `realize_tick(t, expected_sha256)`
+  gained keyword `current_tick` and `due_tick` (`t + lag`) so an empty labels window with
+  `available_at_tick <= current_tick` is final `no_labels`, not `pending`. Finality is a
+  new `final` boolean column on `live_realized_metrics` (migration 5, back-filled from
+  status) because `no_labels` also names the non-final "empty window" / "insufficient
+  sample" outcomes; `REALIZED_FINAL_STATUSES` stays `{realized, evicted}` and
+  `ticks_needing_realization` filters on `final`. `current_tick` is the monitor's tick
+  (the observed tick after a commit, `read_tick` while waiting), not `latest_tick - 1`,
+  so finalization is never earlier than the spec's "current source tick". A 404 on the
+  labels window alone (inferences still served) is `pending` and retried until the due
+  tick has passed, then final `no_labels`; only the inference re-pull marks `evicted`.
+  `label_backfill.run` also sweeps `pending` rows below the window (left by a producer
+  outage) once more. The live tick's "labels pull failed" reason maps to `pending`
+  rather than `error`, since it is transient and the backfill retries it.
