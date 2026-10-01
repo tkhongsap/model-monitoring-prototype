@@ -27,9 +27,9 @@ from sklearn.metrics import roc_auc_score
 
 from ...datagen import churn
 from ..base import LaneResult, TickContext
-from ..telemetry_http import pull, pull_model, window_metadata
+from ..telemetry_http import TelemetryIntegrityError, pull, pull_model, window_metadata
 from . import engines
-from .realized import join_realized
+from .realized import RealizedResult, join_realized
 
 
 class LiveHttpMLAdapter:
@@ -123,6 +123,40 @@ class LiveHttpMLAdapter:
 
     def _on_empty_window(self, res: LaneResult, t: int) -> None:
         """Subclass hook for a count=0 window (NBA marks its extra signals pending)."""
+
+    # -- label-lag backfill (contract §7): re-pull an OLD window's inferences + labels --
+    def realize_tick(self, t: int, expected_sha256: str | None) -> dict[str, RealizedResult]:
+        """Realized metrics for an already-observed tick, keyed by signal key.
+
+        The inferences are re-pulled and verified against the digest stored with the
+        original observation: a changed digest means the producer rewrote an immutable
+        window and the result is an integrity error, never a value.  Raises
+        `WindowEvicted` (from `pull`) when the producer no longer serves the window.
+        """
+        env = pull(self.base_url, self.inferences_path, {"tick": t})
+        meta = window_metadata(env, t)
+        if expected_sha256 and meta.get("content_sha256") != expected_sha256:
+            raise TelemetryIntegrityError(
+                f"tick {t} digest changed: {expected_sha256} -> {meta.get('content_sha256')}")
+        inf = env.get("records") or []
+        if not inf:
+            return self._realized_signals(
+                RealizedResult(None, None, "no_labels", reason="empty window"))
+        if len(inf) < self.chunk_size:
+            # same rule as the live tick: no statistical metric below the window size
+            return self._realized_signals(RealizedResult(
+                None, None, "no_labels",
+                reason=f"insufficient sample: {len(inf)} of {self.chunk_size} records"))
+        labels_env = pull(self.base_url, self.labels_path, {"tick": t})
+        joined = join_realized(inf, labels_env.get("records", []), id_field=self.id_field,
+                               label_field=self._label_field, proba_field=self.proba_field)
+        if labels_env.get("available_at_tick") is not None and not labels_env.get("records"):
+            joined.status, joined.reason = "pending", "label lag"
+        return self._realized_signals(joined)
+
+    def _realized_signals(self, joined: RealizedResult) -> dict[str, RealizedResult]:
+        """Hook: map one label join onto this lane's realized signal keys."""
+        return {"realized_roc_auc": joined}
 
     def monitor(self, use_case_id: str, tick: TickContext) -> LaneResult:
         res = LaneResult()

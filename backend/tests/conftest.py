@@ -51,30 +51,40 @@ class FakeProducer:
         self.latest = 3
         self.label_lag = LABEL_LAG
         self.empty: set[int] = set()
-        self.released: set[int] = set()
+        self.released: dict[int, float] = {}      # tick -> label coverage fraction
         self.evicted: set[int] = set()
         self.calls: list[tuple[str, dict | None]] = []
 
     # -- scripting helpers -------------------------------------------------------
-    def release_labels(self, tick: int) -> None:
-        self.released.add(tick)
+    def release_labels(self, tick: int, coverage: float = 1.0) -> None:
+        self.released[tick] = coverage
 
     def evict(self, tick: int) -> None:
         self.evicted.add(tick)
 
     # -- data --------------------------------------------------------------------
     @staticmethod
-    def records(tick: int) -> list[dict]:
+    def records(tick: int, kind: str = "ml") -> list[dict]:
+        if kind == "nba":
+            return [{
+                "rec_id": f"t{tick}-r{i}",
+                "features": {"a": float(i % 7), "b": float(i % 3)},
+                "accept_proba": (i % 10) / 10, "served_version": 1,
+                "offer_mix": {"upgrade": 0.5, "retain": 0.5},
+            } for i in range(WINDOW_SIZE)]
         return [{
             "inference_id": f"t{tick}-i{i}",
             "features": {"a": float(i % 7), "b": float(i % 3)},
             "churn_proba": (i % 10) / 10,
         } for i in range(WINDOW_SIZE)]
 
-    @staticmethod
-    def labels(tick: int) -> list[dict]:
+    def labels(self, tick: int, kind: str = "ml") -> list[dict]:
+        n = int(round(WINDOW_SIZE * self.released.get(tick, 1.0)))
+        if kind == "nba":
+            return [{"rec_id": f"t{tick}-r{i}", "accepted": int((i % 10) >= 5)}
+                    for i in range(n)]
         return [{"inference_id": f"t{tick}-i{i}", "label": int((i % 10) >= 5)}
-                for i in range(WINDOW_SIZE)]
+                for i in range(n)]
 
     @staticmethod
     def reference() -> list[dict]:
@@ -95,14 +105,15 @@ class FakeProducer:
         tick = int(params["tick"]) if params and "tick" in params else None
         if path == "/telemetry/reference":
             return {"contract_version": "1.1", "records": self.reference()}
+        kind = "nba" if path in ("/telemetry/recommendations", "/telemetry/rewards") else "ml"
         if path in ("/telemetry/inferences", "/telemetry/recommendations"):
             if tick in self.evicted:
                 raise telemetry_http.WindowEvicted(
                     f"{path} tick={tick} not available (404)")
-            return self._window(tick, [] if tick in self.empty else self.records(tick))
+            return self._window(tick, [] if tick in self.empty else self.records(tick, kind))
         if path in ("/telemetry/labels", "/telemetry/rewards"):
             if tick in self.released:
-                return self._window(tick, self.labels(tick))
+                return self._window(tick, self.labels(tick, kind))
             return {"contract_version": "1.1", "records": [], "count": 0,
                     "available_at_tick": tick + self.label_lag}
         raise AssertionError(f"fake producer has no route for {path}")

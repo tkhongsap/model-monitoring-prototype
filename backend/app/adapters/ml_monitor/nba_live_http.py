@@ -25,6 +25,7 @@ import numpy as np
 
 from ..base import LaneResult
 from .live_http import LiveHttpMLAdapter
+from .realized import MIN_COVERAGE, RealizedResult
 
 
 def _tv_distance(p: dict, q: dict) -> float:
@@ -61,6 +62,17 @@ class LiveHttpNBAAdapter(LiveHttpMLAdapter):
         res.errors["recommendation_drift_pending"] = "empty window"
         res.records["offer_mix"] = None
         res.records["baseline_offer_mix"] = self._baseline_mix
+
+    def _realized_signals(self, joined: RealizedResult) -> dict[str, RealizedResult]:
+        # acceptance_rate needs matched rewards with enough coverage, not both classes:
+        # a window where every offer was accepted (single_class for AUC) still has a
+        # perfectly good acceptance rate.
+        covered = bool(joined.matched) and (joined.coverage or 0.0) >= MIN_COVERAGE
+        acceptance = RealizedResult(
+            float(np.mean(joined.matched)) if covered else None, joined.coverage,
+            "realized" if covered else joined.status, list(joined.matched),
+            None if covered else joined.reason)
+        return {"realized_roc_auc": joined, "acceptance_rate": acceptance}
 
     def _extend(self, res: LaneResult, inf: list, matched: list,
                 coverage: float | None, pending: str | None, t: int) -> None:

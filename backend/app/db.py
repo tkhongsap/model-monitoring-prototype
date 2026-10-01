@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import threading
 import time
 import uuid
@@ -451,6 +452,12 @@ def mark_live_contact(source_id: str, source_tick: int | None, backlog: int,
                 source_tick=source_tick, backlog=max(0, int(backlog)), state=state,
                 last_checked_at=now, last_error=None, last_error_at=None, updated_at=now))
     return get_live_source(source_id)
+
+
+def mark_live_warning(source_id: str, warning: str) -> None:
+    """Record a non-fatal live-plane problem. Logged only: a warning must never move a
+    source into the `error` state or hold its cursor (the backfill uses this)."""
+    logging.getLogger(__name__).warning("%s: %s", source_id, warning)
 
 
 def mark_live_error(source_id: str, error: str) -> dict:

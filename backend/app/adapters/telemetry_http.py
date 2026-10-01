@@ -21,6 +21,10 @@ class TelemetryIntegrityError(RuntimeError):
     """Producer metadata does not match the exact public records on the wire."""
 
 
+class WindowEvicted(RuntimeError):
+    """The producer no longer serves this window (HTTP 404) — contract §6 'missing'."""
+
+
 def canonical_records_sha256(records: list[dict]) -> str:
     """Digest the exact decoded primary-record list using the v1.1 canonical JSON form."""
     canonical = json.dumps(records, sort_keys=True, separators=(",", ":"),
@@ -50,6 +54,9 @@ def pull(base_url: str, path: str, params: dict | None = None, timeout: float = 
     count, records, ...}."""
     r = httpx.get(base_url.rstrip("/") + path, params=params, timeout=timeout,
                   headers=_auth_headers())
+    if r.status_code == 404:
+        tick = params.get("tick") if params else None
+        raise WindowEvicted(f"{path} tick={'?' if tick is None else tick} not available (404)")
     r.raise_for_status()
     return r.json()
 

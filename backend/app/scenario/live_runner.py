@@ -15,7 +15,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import threading
 
-from .. import config, db
+from .. import config, db, label_backfill
 from ..adapters.base import ExplainResult, TickContext
 from ..adapters.explain.lime_shap import make_explain
 from ..adapters.explain.live_http import LiveHttpExplainAdapter
@@ -112,6 +112,16 @@ def _commit_tick(runner, payload: dict, telemetry_err: str | None, meta: dict) -
     payload["window_digest"] = payload.get("content_sha256")
     runner._current = payload
 
+    # The just-observed tick's realized rows (normally `pending`: labels lag).  Lives in
+    # live_realized_metrics only — the stored observation above is never rewritten.
+    realized_keys = getattr(runner, "realized_keys", ())
+    if realized_keys:
+        try:
+            label_backfill.record_current_tick(
+                runner.use_case_id, runner._read_tick - 1, payload, realized_keys)
+        except Exception as exc:  # noqa: BLE001 — never undo a committed observation
+            db.mark_live_warning(runner.use_case_id, f"realized row: {exc}")
+
     # Acknowledgement is deliberately after the durable local commit.  Its failure is
     # persisted separately and never rolls back or loses the observation.
     if config.LIVE_PRODUCER_URL:
@@ -199,7 +209,21 @@ def _ahead_of_app(base_url: str, read_tick: int, uc: str) -> tuple[dict | None, 
     return None, meta
 
 
+def _backfill_labels(runner, meta: dict, current_tick: int) -> None:
+    """Realize lagged labels for recent ticks; a failure here never fails the tick."""
+    try:
+        label_backfill.run(
+            runner.use_case_id, runner.ml, current_tick=current_tick,
+            lag=label_backfill.lag_from_meta(meta, kind=runner.lane_kind),
+            metric_keys=runner.realized_keys)
+    except Exception as exc:  # noqa: BLE001
+        db.mark_live_warning(runner.use_case_id, f"backfill: {type(exc).__name__}: {exc}")
+
+
 class LiveRunner:
+    realized_keys = ("realized_roc_auc",)
+    lane_kind = "ml"
+
     def __init__(self, churn_url: str | None = None, seed: int | None = None) -> None:
         self.use_case_id = LIVE_UC
         self.seed = seed if seed is not None else config.DEMO_SEED
@@ -252,13 +276,18 @@ class LiveRunner:
             t = self._read_tick
             waiting, meta = _ahead_of_app(self.base_url, t, LIVE_UC)
             if waiting:
+                if meta:  # producer reachable: labels may have landed for older ticks
+                    _backfill_labels(self, meta, t)
                 return waiting  # don't advance, don't store as _current
             ctx = TickContext(tick=t, seed=self.seed, scenario_id="LIVE")
             ml_res = self.ml.monitor(LIVE_UC, ctx)
             ex_res = (ExplainResult() if _NO_EXPLAIN & ml_res.errors.keys()
                       else self.explain.explain(LIVE_UC, ctx))
             payload = self._grade(ml_res, ex_res, t)
-            return _commit_tick(self, payload, ml_res.errors.get("telemetry"), meta)
+            out = _commit_tick(self, payload, ml_res.errors.get("telemetry"), meta)
+            if not out.get("cursor_held"):
+                _backfill_labels(self, meta, t)
+            return out
 
     def state(self) -> dict | None:
         latest = db.get_latest_live_observation(self.use_case_id)
@@ -340,6 +369,9 @@ class LiveNBARunner:
     acceptance_rate once rewards arrive, reasoned-Unknown (excluded from overall) while
     they lag."""
 
+    realized_keys = ("realized_roc_auc", "acceptance_rate")
+    lane_kind = "nba"
+
     def __init__(self, nba_url: str | None = None, seed: int | None = None) -> None:
         self.use_case_id = LIVE_NBA_UC
         self.seed = seed if seed is not None else config.DEMO_SEED
@@ -409,13 +441,18 @@ class LiveNBARunner:
             t = self._read_tick
             waiting, meta = _ahead_of_app(self.base_url, t, LIVE_NBA_UC)
             if waiting:
+                if meta:
+                    _backfill_labels(self, meta, t)
                 return waiting
             ctx = TickContext(tick=t, seed=self.seed, scenario_id="LIVE")
             ml_res = self.ml.monitor(LIVE_NBA_UC, ctx)
             ex_res = (ExplainResult() if _NO_EXPLAIN & ml_res.errors.keys()
                       else self.explain.explain(LIVE_NBA_UC, ctx))
             payload = self._grade(ml_res, ex_res, t)
-            return _commit_tick(self, payload, ml_res.errors.get("telemetry"), meta)
+            out = _commit_tick(self, payload, ml_res.errors.get("telemetry"), meta)
+            if not out.get("cursor_held"):
+                _backfill_labels(self, meta, t)
+            return out
 
     def state(self) -> dict | None:
         latest = db.get_latest_live_observation(self.use_case_id)
