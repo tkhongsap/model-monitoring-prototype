@@ -128,7 +128,7 @@ class LiveHttpMLAdapter:
 
     # -- label-lag backfill (contract §7): re-pull an OLD window's inferences + labels --
     def realize_tick(self, t: int, expected_sha256: str | None, *,
-                     current_tick: int | None = None,
+                     source_tick: int | None = None,
                      due_tick: int | None = None) -> dict[str, RealizedResult]:
         """Realized metrics for an already-observed tick, keyed by signal key.
 
@@ -138,11 +138,12 @@ class LiveHttpMLAdapter:
         `WindowEvicted` only when the producer no longer serves the INFERENCE window.
 
         Spec B.2 "done" rule: when the labels window is still empty and its
-        `available_at_tick` is at or before `current_tick`, the tick is final `no_labels`
-        (`final=True`); before that it is `pending`.  A 404 on the labels window alone is
-        not eviction: it is `pending` and retried until `due_tick` (the monitor's own
-        `t + lag`, used because a 404 carries no `available_at_tick`) has passed, then
-        final `no_labels`.
+        `available_at_tick` is at or before `source_tick` — the producer's latest CLOSED
+        tick (`latest_tick - 1`), never the open one it is still writing — the tick is
+        final `no_labels` (`final=True`); before that it is `pending`.  A 404 on the
+        labels window alone is not eviction: it is `pending` and retried until `due_tick`
+        (the monitor's own `t + lag`, used because a 404 carries no `available_at_tick`)
+        is at or before `source_tick`, then final `no_labels`.
         """
         env = pull(self.base_url, self.inferences_path, {"tick": t})
         meta = window_metadata(env, t)
@@ -158,23 +159,23 @@ class LiveHttpMLAdapter:
             return self._realized_signals(RealizedResult(
                 None, None, "no_labels",
                 reason=f"insufficient sample: {len(inf)} of {self.chunk_size} records"))
-        overdue = (current_tick is not None and due_tick is not None
-                   and int(due_tick) <= int(current_tick))
+        overdue = (source_tick is not None and due_tick is not None
+                   and int(due_tick) <= int(source_tick))
         try:
             labels_env = pull(self.base_url, self.labels_path, {"tick": t})
         except WindowEvicted as exc:
             if overdue:
                 return self._realized_signals(RealizedResult(
                     None, 0.0, "no_labels", final=True,
-                    reason=f"{exc}; due at tick {due_tick}, none by tick {current_tick}"))
+                    reason=f"{exc}; due at tick {due_tick}, none by tick {source_tick}"))
             return self._realized_signals(RealizedResult(None, 0.0, "pending", reason=str(exc)))
         joined = join_realized(inf, labels_env.get("records", []), id_field=self.id_field,
                                label_field=self._label_field, proba_field=self.proba_field)
         available_at = labels_env.get("available_at_tick")
         if available_at is not None and not labels_env.get("records"):
-            if current_tick is not None and int(available_at) <= int(current_tick):
+            if source_tick is not None and int(available_at) <= int(source_tick):
                 joined.status, joined.final = "no_labels", True
-                joined.reason = (f"no labels published by tick {current_tick} "
+                joined.reason = (f"no labels published by tick {source_tick} "
                                  f"(due at tick {available_at})")
             else:
                 joined.status, joined.reason = "pending", "label lag"

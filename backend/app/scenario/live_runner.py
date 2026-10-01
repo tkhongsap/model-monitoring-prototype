@@ -217,12 +217,20 @@ def _ahead_of_app(base_url: str, read_tick: int, uc: str) -> tuple[dict | None, 
 
 
 def _backfill_labels(runner, meta: dict, current_tick: int) -> None:
-    """Realize lagged labels for recent ticks; a failure here never fails the tick."""
+    """Realize lagged labels for recent ticks; a failure here never fails the tick.
+
+    `current_tick` (the monitor's tick) bounds the window.  Finality is judged against
+    the producer's latest CLOSED tick, `latest_tick - 1` (the same `source_tick` that
+    `_commit_tick` stores): while waiting at the tail `current_tick == latest_tick`, the
+    window the producer is still writing, and labels due in it may still be published.
+    """
     try:
+        latest_tick = meta.get("latest_tick")
+        source_tick = (int(latest_tick) - 1) if latest_tick is not None else current_tick
         label_backfill.run(
             runner.use_case_id, runner.ml, current_tick=current_tick,
             lag=label_backfill.lag_from_meta(meta, kind=runner.lane_kind),
-            metric_keys=runner.realized_keys)
+            metric_keys=runner.realized_keys, source_tick=source_tick)
     except Exception as exc:  # noqa: BLE001
         db.mark_live_warning(runner.use_case_id, f"backfill: {type(exc).__name__}: {exc}")
 

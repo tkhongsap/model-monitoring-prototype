@@ -4,9 +4,10 @@ Contract §7: labels (ML) and rewards (NBA) arrive `label_lag_ticks` / `reward_l
 after a window closes.  The live tick can therefore only record *pending* for the window
 it observes; this module revisits the ticks in `[t - L - 1, t)` on every poll cycle and
 writes the outcome to `live_realized_metrics`.  A tick is *done* (`final`) once it is
-`realized`, `evicted`, or the producer's `available_at_tick` has passed with no labels
-(final `no_labels`, spec B.2); `pending` rows that slipped below the window during a
-producer outage are swept once more so no tick is left `pending` forever.  It never
+`realized`, `evicted`, or the producer's `available_at_tick` is at or before the
+producer's latest CLOSED tick (`latest_tick - 1`, the spec's "current source tick") with
+still no labels (final `no_labels`, spec B.2); `pending` rows that slipped below the
+window during a producer outage are swept once more so no tick is left `pending` forever.  It never
 touches `live_observations`:
 the stored payload and digest stay byte-identical, and the realized value is used by
 `realized_view.apply_realized` when the use case is graded.
@@ -73,17 +74,25 @@ def record_current_tick(source_id: str, tick: int, payload: dict,
 
 
 def run(source_id: str, adapter, *, current_tick: int, lag: int,
-        metric_keys: tuple[str, ...]) -> list[dict]:
+        metric_keys: tuple[str, ...], source_tick: int | None = None) -> list[dict]:
     """Realize every non-final tick in `[current_tick - lag - 1, current_tick)`, plus any
     older tick still `pending`.
 
+    `current_tick` (the monitor's own tick) bounds the window only.  Finality is judged
+    against `source_tick`, the producer's latest closed tick (`latest_tick - 1`): while
+    the monitor waits at the tail its tick equals the producer's still-OPEN window, in
+    which labels may yet be published, so that tick must never finalize anything.  With
+    no `source_tick` the monitor's tick is used (it is never later than the source tick).
+
     Returns the rows written as `{"tick", "metric_key", "status"}`.  A 404 on the
     inference window marks the tick `evicted` (final — the producer will never serve it
-    again); a digest mismatch marks it `error` (retried, surfaced); labels missing at or
-    after their due tick mark it final `no_labels`; any other failure is logged and stops
-    this cycle's backfill so a flapping producer is not hammered.  Nothing here ever
-    holds the source cursor.
+    again); a digest mismatch marks it `error` (retried, surfaced); labels missing once
+    their due tick is at or before `source_tick` mark it final `no_labels`; any other
+    failure is logged and stops this cycle's backfill so a flapping producer is not
+    hammered.  Nothing here ever holds the source cursor.
     """
+    if source_tick is None:
+        source_tick = current_tick
     low, high = max(0, current_tick - lag - 1), current_tick
     in_window = {t for key in metric_keys
                  for t in db.ticks_needing_realization(source_id, key, low, high)}
@@ -96,7 +105,7 @@ def run(source_id: str, adapter, *, current_tick: int, lag: int,
         obs = db.get_live_observation_by_tick(source_id, t)
         expected = obs["content_sha256"] if obs else None
         try:
-            results = adapter.realize_tick(t, expected, current_tick=current_tick,
+            results = adapter.realize_tick(t, expected, source_tick=source_tick,
                                            due_tick=t + lag)
         except WindowEvicted as exc:
             for key in metric_keys:
