@@ -191,6 +191,41 @@ live_realized_metrics = Table(
 # revisited by the backfill.
 REALIZED_FINAL_STATUSES = frozenset({"realized", "evicted"})
 
+# Alerting (spec C.1).  `live_health_snapshots` holds the last graded health per source
+# (the "previous" side of the transition diff); `live_alerts` holds one row per opened
+# alert with its delivery bookkeeping for the open and resolve notifications.  Both are
+# derived metadata: no raw telemetry, no features, no trace text.
+live_health_snapshots = Table(
+    "live_health_snapshots", metadata,
+    Column("source_id", String, primary_key=True),
+    Column("tick", Integer),
+    Column("overall", String, nullable=False),
+    Column("lanes_json", Text, nullable=False),
+    Column("updated_at", Float, nullable=False),
+)
+
+live_alerts = Table(
+    "live_alerts", metadata,
+    Column("alert_id", String, primary_key=True),
+    Column("source_id", String, nullable=False, index=True),
+    Column("lane", String, nullable=False),
+    Column("from_health", String),
+    Column("to_health", String, nullable=False),
+    Column("tick", Integer),
+    Column("observation_id", String),
+    Column("opened_at", Float, nullable=False),
+    Column("resolved_at", Float),
+    Column("resolved_tick", Integer),
+    Column("open_delivery_status", String, nullable=False, default="pending"),
+    Column("open_delivery_error", Text),
+    Column("open_delivered_at", Float),
+    Column("resolve_delivery_status", String, nullable=False, default="n/a"),
+    Column("resolve_delivery_error", Text),
+    Column("resolve_delivered_at", Float),
+)
+
+ALERT_DELIVERY_RETRY_STATUSES = frozenset({"pending", "error"})
+
 live_worker_leases = Table(
     "live_worker_leases", metadata,
     Column("lease_name", String, primary_key=True),
@@ -231,6 +266,8 @@ def migrate_engine(bind) -> list[int]:
         (4, "label-lag realized metrics",
          lambda cx: live_realized_metrics.create(bind=cx, checkfirst=True)),
         (5, "realized-metric finality flag", add_realized_final),
+        (6, "live alerts and health snapshots", lambda cx: metadata.create_all(
+            bind=cx, tables=[live_health_snapshots, live_alerts], checkfirst=True)),
     ]
     applied_now: list[int] = []
     # The local lock also makes SQLite thread-contention tests deterministic. Managed
@@ -753,6 +790,128 @@ def pending_ticks_below(source_id: str, metric_key: str, below: int) -> list[int
     return sorted(int(t) for t in rows)
 
 
+# ------------------------------------------------------------------- alerting
+
+def get_health_snapshot(source_id: str) -> dict | None:
+    """The last graded health per lane (plus overall) for a source, or None."""
+    with engine().begin() as cx:
+        row = cx.execute(select(live_health_snapshots).where(
+            live_health_snapshots.c.source_id == source_id)).mappings().fetchone()
+    if not row:
+        return None
+    return {"source_id": row["source_id"], "tick": row["tick"], "overall": row["overall"],
+            "lanes": json.loads(row["lanes_json"] or "{}"), "updated_at": row["updated_at"]}
+
+
+def put_health_snapshot(source_id: str, tick: int | None, overall: str,
+                        lanes: dict[str, str]) -> None:
+    values = {"tick": None if tick is None else int(tick), "overall": overall,
+              "lanes_json": json.dumps(dict(lanes), sort_keys=True), "updated_at": time.time()}
+    with engine().begin() as cx:
+        updated = cx.execute(update(live_health_snapshots).where(
+            live_health_snapshots.c.source_id == source_id).values(**values))
+        if updated.rowcount:
+            return
+        try:
+            with cx.begin_nested():
+                cx.execute(insert(live_health_snapshots), {"source_id": source_id, **values})
+        except IntegrityError:  # another lease holder inserted first
+            cx.execute(update(live_health_snapshots).where(
+                live_health_snapshots.c.source_id == source_id).values(**values))
+
+
+def open_alert(source_id: str, lane: str, from_health: str | None, to_health: str,
+               tick: int | None, observation_id: str | None) -> str:
+    alert_id = uuid.uuid4().hex
+    with engine().begin() as cx:
+        cx.execute(insert(live_alerts), {
+            "alert_id": alert_id, "source_id": source_id, "lane": lane,
+            "from_health": from_health, "to_health": to_health,
+            "tick": None if tick is None else int(tick), "observation_id": observation_id,
+            "opened_at": time.time(), "resolved_at": None, "resolved_tick": None,
+            "open_delivery_status": "pending", "open_delivery_error": None,
+            "open_delivered_at": None, "resolve_delivery_status": "n/a",
+            "resolve_delivery_error": None, "resolve_delivered_at": None,
+        })
+    return alert_id
+
+
+def resolve_alerts(source_id: str, lane: str, tick: int | None) -> list[str]:
+    """Close every open alert on a lane; the resolve notification becomes pending."""
+    where = ((live_alerts.c.source_id == source_id) & (live_alerts.c.lane == lane)
+             & (live_alerts.c.resolved_at.is_(None)))
+    with engine().begin() as cx:
+        ids = list(cx.execute(select(live_alerts.c.alert_id).where(where)).scalars())
+        if ids:
+            cx.execute(update(live_alerts).where(live_alerts.c.alert_id.in_(ids)).values(
+                resolved_at=time.time(), resolved_tick=None if tick is None else int(tick),
+                resolve_delivery_status="pending"))
+    return ids
+
+
+def open_alert_keys(source_id: str) -> set[tuple[str, str]]:
+    with engine().begin() as cx:
+        rows = cx.execute(select(live_alerts.c.lane, live_alerts.c.to_health).where(
+            (live_alerts.c.source_id == source_id)
+            & (live_alerts.c.resolved_at.is_(None)))).fetchall()
+    return {(lane, health) for lane, health in rows}
+
+
+def list_alerts(source_id: str | None = None, open_only: bool = False,
+                limit: int = 50) -> list[dict]:
+    """Alerts newest first (by opened_at); only derived columns, never raw telemetry."""
+    q = select(live_alerts)
+    if source_id:
+        q = q.where(live_alerts.c.source_id == source_id)
+    if open_only:
+        q = q.where(live_alerts.c.resolved_at.is_(None))
+    q = q.order_by(live_alerts.c.opened_at.desc(), live_alerts.c.alert_id.desc()).limit(
+        max(1, min(int(limit), 500)))
+    with engine().begin() as cx:
+        rows = cx.execute(q).mappings().all()
+    return [dict(r) for r in rows]
+
+
+def alerts_pending_delivery(limit: int = 100) -> list[dict]:
+    """Alerts whose open or resolve notification is still pending or errored."""
+    retry = sorted(ALERT_DELIVERY_RETRY_STATUSES)
+    q = (select(live_alerts).where(or_(
+            live_alerts.c.open_delivery_status.in_(retry),
+            live_alerts.c.resolve_delivery_status.in_(retry)))
+         .order_by(live_alerts.c.opened_at).limit(max(1, min(int(limit), 500))))
+    with engine().begin() as cx:
+        rows = cx.execute(q).mappings().all()
+    return [dict(r) for r in rows]
+
+
+def mark_alert_delivery(alert_id: str, phase: str, *, ok: bool, error: str | None) -> None:
+    if phase not in ("open", "resolve"):
+        raise ValueError(f"unknown alert delivery phase {phase!r}")
+    values = {
+        f"{phase}_delivery_status": "delivered" if ok else "error",
+        f"{phase}_delivery_error": None if ok else (error or "unknown delivery error"),
+        f"{phase}_delivered_at": time.time() if ok else None,
+    }
+    with engine().begin() as cx:
+        cx.execute(update(live_alerts).where(live_alerts.c.alert_id == alert_id).values(**values))
+
+
+def mark_alerts_delivery_skipped(alert_ids: list[str], reason: str) -> None:
+    """No webhook configured: record it on every still-pending phase (never retried)."""
+    if not alert_ids:
+        return
+    retry = sorted(ALERT_DELIVERY_RETRY_STATUSES)
+    with engine().begin() as cx:
+        cx.execute(update(live_alerts).where(
+            live_alerts.c.alert_id.in_(alert_ids)
+            & live_alerts.c.open_delivery_status.in_(retry)).values(
+                open_delivery_status="skipped", open_delivery_error=reason))
+        cx.execute(update(live_alerts).where(
+            live_alerts.c.alert_id.in_(alert_ids)
+            & live_alerts.c.resolve_delivery_status.in_(retry)).values(
+                resolve_delivery_status="skipped", resolve_delivery_error=reason))
+
+
 def set_live_ack(observation_id: str, *, ok: bool, error: str | None = None) -> None:
     with engine().begin() as cx:
         cx.execute(update(live_observations).where(
@@ -788,11 +947,16 @@ def clear_live_state(source_id: str | None = None) -> None:
             cx.execute(delete(live_observations).where(live_observations.c.source_id == source_id))
             cx.execute(delete(live_realized_metrics).where(
                 live_realized_metrics.c.source_id == source_id))
+            cx.execute(delete(live_alerts).where(live_alerts.c.source_id == source_id))
+            cx.execute(delete(live_health_snapshots).where(
+                live_health_snapshots.c.source_id == source_id))
             cx.execute(delete(live_source_cursors).where(live_source_cursors.c.source_id == source_id))
         else:
             cx.execute(delete(live_signal_history))
             cx.execute(delete(live_observations))
             cx.execute(delete(live_realized_metrics))
+            cx.execute(delete(live_alerts))
+            cx.execute(delete(live_health_snapshots))
             cx.execute(delete(live_source_cursors))
 
 

@@ -141,4 +141,4 @@ def test_versioned_migrations_are_idempotent_under_thread_contention(isolated_db
     assert db.migrate_engine(bind) == []
     with bind.begin() as cx:
         versions = list(cx.execute(db.select(db.schema_migrations.c.version)).scalars())
-    assert versions == [1, 2, 3, 4, 5]
+    assert versions == [1, 2, 3, 4, 5, 6]
