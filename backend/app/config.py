@@ -158,11 +158,17 @@ def live_configuration_errors() -> list[str]:
         ("LIVE_NBA_URL", LIVE_NBA_URL),
         ("LIVE_PRODUCER_URL", LIVE_PRODUCER_URL),
     ):
-        host = (urlsplit(value).hostname or "").lower() if value else ""
+        parts = urlsplit(value) if value else None
+        host = (parts.hostname or "").lower() if parts else ""
         if not value:
             errors.append(f"{name} is required")
-        elif host in {"127.0.0.1", "localhost", "::1"}:
+            continue
+        if host in {"127.0.0.1", "localhost", "::1"}:
             errors.append(f"{name} must be an external deployment URL")
+        # Producer telemetry carries a bearer token; it must never cross the network in
+        # clear text (spec E.4).  The only bypass is ALLOW_INSECURE_LIVE_TESTING above.
+        if parts.scheme.lower() != "https":
+            errors.append(f"{name} must use https in strict live mode")
     if not LIVE_TELEMETRY_TOKEN:
         errors.append("LIVE_TELEMETRY_TOKEN is required")
     if not LIVE_WORKER_TOKEN:

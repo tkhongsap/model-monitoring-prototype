@@ -11,8 +11,9 @@ Judge:
     overlap(answer, retrieval_context ∪ tool_outputs) — a refusal is treated as grounded;
     relevance = overlap(question, answer ∪ context); hallucination = non-refusal ∧ low
     groundedness; pii = regex over the answer.
-  - REAL Claude (`claude-opus-4-8`, `messages.parse` → structured per-trace scores) when
-    `config.ANTHROPIC_API_KEY` is set — a one-line flip, same signal contract.
+  - REAL Claude (`config.LLM_JUDGE_MODEL`, default `claude-haiku-4-5`; `messages.parse` →
+    structured per-trace scores) when `config.ANTHROPIC_API_KEY` is set — a one-line
+    flip, same signal contract.
 
 Every step degrades to None (Unknown) on failure, never crashing the tick — matching the
 seeded adapter's contract.
@@ -129,6 +130,12 @@ def _judge_claude(traces: list[dict], model: str, *, allow_fallback: bool = True
         return list(ex.map(judge_one, traces))   # map preserves trace order
 
 
+def _latency_or_none(trace: dict, ndigits: int) -> float | None:
+    """Rounded `latency_s`, or None when the trace does not carry one (never 0.0)."""
+    value = trace.get("latency_s")
+    return None if value is None else round(float(value), ndigits)
+
+
 def _aggregate(scores: list[dict], latencies: list[float]) -> dict:
     n = len(scores)
     if not n:
@@ -204,7 +211,12 @@ class LiveHttpLLMAdapter:
                 judge = "heuristic-v1"           # developer/demo mode only
                 scores = [_judge_offline(t) for t in traces]
 
-            latencies = [float(t.get("latency_s", 0.0)) for t in traces]
+            # contract §5: latency_s is optional per trace.  A missing value is never
+            # read as 0.0 — it is excluded from the p95 and counted (spec E.3).
+            latencies = [float(t["latency_s"]) for t in traces
+                         if t.get("latency_s") is not None]
+            res.metadata["latency_missing"] = sum(
+                1 for t in traces if t.get("latency_s") is None)
             res.signals.update(_aggregate(scores, latencies))
 
             # persist traces + scores so the drill-down Traces tab reads them back.
@@ -217,7 +229,7 @@ class LiveHttpLLMAdapter:
                         name="telco_chatbot", input=tr.get("question", ""),
                         output=tr.get("answer", ""),
                         metadata={"topic": tr.get("topic", ""),
-                                  "latency_s": round(float(tr.get("latency_s", 0.0)), 3),
+                                  "latency_s": _latency_or_none(tr, 3),
                                   "refused": bool(tr.get("refused")), "judge": judge})
                     self.store.score(t, "groundedness", sc["groundedness"])
                     self.store.score(t, "relevance", sc["relevance"])
@@ -264,7 +276,7 @@ class LiveHttpLLMAdapter:
                         "groundedness": round(sc["groundedness"], 3),
                         "relevance": round(sc["relevance"], 3),
                         "hallucination": sc["hallucination"], "pii": sc["pii"],
-                        "latency_s": round(float(tr.get("latency_s", 0.0)), 2),
+                        "latency_s": _latency_or_none(tr, 2),
                         "judge": judge})
             res.records = sample
         except Exception as e:  # noqa: BLE001 — degrade, never crash the tick

@@ -27,6 +27,26 @@ class WindowEvicted(RuntimeError):
     """The producer no longer serves this window (HTTP 404) — contract §6 'missing'."""
 
 
+SUPPORTED_CONTRACT_VERSIONS = frozenset({"1.0", "1.1"})
+
+
+class ContractVersionError(RuntimeError):
+    """The producer answered with a contract_version this monitor does not speak.
+
+    Raised from `pull` before any record is read, so it lands in the adapter's
+    `errors["telemetry"]` degrade path and the cursor is held (spec E.2)."""
+
+
+def _check_contract_version(data: dict, path: str, *, required: bool) -> None:
+    version = data.get("contract_version") if isinstance(data, dict) else None
+    if version is None and not required:
+        return
+    if version is None or str(version) not in SUPPORTED_CONTRACT_VERSIONS:
+        raise ContractVersionError(
+            f"contract: unsupported contract_version {version!r} from {path}; "
+            f"supported {sorted(SUPPORTED_CONTRACT_VERSIONS)}")
+
+
 def canonical_records_sha256(records: list[dict]) -> str:
     """Digest the exact decoded primary-record list using the v1.1 canonical JSON form."""
     canonical = json.dumps(records, sort_keys=True, separators=(",", ":"),
@@ -82,7 +102,9 @@ def pull(base_url: str, path: str, params: dict | None = None, timeout: float = 
         tick = params.get("tick") if params else None
         raise WindowEvicted(f"{path} tick={'?' if tick is None else tick} not available (404)")
     r.raise_for_status()
-    return r.json()
+    data = r.json()
+    _check_contract_version(data, path, required=True)
+    return data
 
 
 def pull_meta(base_url: str, timeout: float = 10.0, *, strict: bool = False) -> dict:
@@ -93,7 +115,11 @@ def pull_meta(base_url: str, timeout: float = 10.0, *, strict: bool = False) -> 
         r = _get(base_url.rstrip("/") + "/telemetry/meta", timeout=timeout,
                  headers=_auth_headers())
         r.raise_for_status()
-        return r.json()
+        data = r.json()
+        # meta is advisory and a v1.0 producer may omit the field; when it IS present it
+        # must be a version this monitor speaks.
+        _check_contract_version(data, "/telemetry/meta", required=False)
+        return data
     except Exception:  # noqa: BLE001 — callers choose advisory vs required semantics
         if strict:
             raise
