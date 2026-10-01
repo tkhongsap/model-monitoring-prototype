@@ -20,15 +20,17 @@ pnpm install --frozen-lockfile
 pnpm run typecheck
 ```
 
-Expected result: pytest prints `40 passed, 9 deselected` (the deselected tests are the
-slow DEMO-FULL bakes) and `pnpm run typecheck` ends with `Done` for every package.
+Expected result: pytest reports all tests passed with `9 deselected` (the deselected
+tests are the slow DEMO-FULL bakes; exact counts live in `DEVLOG.md`) and
+`pnpm run typecheck` ends with `Done` for every package.
 
 To see the API, from `backend/` run
 `CONTROL_TOWER_MODE=demo LIVE_POLL_SECONDS=0 .venv/bin/python -m uvicorn app.main:app --port 8000`
 and open `http://127.0.0.1:8000/api/readiness`. It returns HTTP 200 with
 `{"status": "ready", "database": {"ok": true, ...}, "mode": "demo"}`. In strict live
-mode the same endpoint returns 503 `not_ready` until the configuration in
-[docs/STRICT-LIVE.md](docs/STRICT-LIVE.md) is present.
+mode the same endpoint returns 503 (`not_ready`, or `degraded` when only the judge key
+is missing) until the configuration in [docs/STRICT-LIVE.md](docs/STRICT-LIVE.md) is
+present.
 
 ## Scope
 
@@ -84,7 +86,7 @@ Layout: `backend/app/engines/` are pure functions, `backend/app/adapters/` do I/
 | Task | Command | Evidence |
 |---|---|---|
 | Build | `pnpm run build:live` (repo root; Linux x64 only, see [TESTING.md](TESTING.md)) | `artifacts/control-tower/dist/public/` produced |
-| Unit tests | `.venv/bin/python -m pytest -q -m "not slow"` (from `backend/`) | `40 passed, 9 deselected` |
+| Unit tests | `.venv/bin/python -m pytest -q -m "not slow"` (from `backend/`) | all passed, `9 deselected` (slow bakes) |
 | Integration tests | `.venv/bin/python -m pytest -q` (from `backend/`) | adds the slow DEMO-FULL bake and calibration tests; SQLite, no external services |
 | AI evaluations | none automated | the LLM judge is exercised only with a fake judge in `backend/tests/test_live_judge_strict.py`; no live Claude call |
 | Lint/type/security | `pnpm run typecheck`; `pnpm run check:strict-live` (repo root) | `Done` per package; bundle contains no forbidden strings |

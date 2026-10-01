@@ -9,7 +9,7 @@ REQUIRED = ["README.md", "CLAUDE.md", "AGENTS.md", "CHANGELOG.md", "DEVLOG.md", 
 
 # A machine-local path is a home directory with a user segment (e.g. "/Users/<name>/")
 # or a file URL with a path. The rule text itself may name the markers without tripping.
-LOCAL_PATH = re.compile(r"/Users/[A-Za-z0-9_.-]+/|file://[A-Za-z0-9/~]")
+LOCAL_PATH = re.compile(r"/Users/[A-Za-z0-9_.-]+(?:/|\b)|file://[A-Za-z0-9/~]")
 
 
 def _md_files() -> list[Path]:
