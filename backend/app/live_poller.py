@@ -77,7 +77,7 @@ class LivePoller:
         heartbeat_thread = threading.Thread(
             target=heartbeat, name="live-poller-lease-heartbeat", daemon=True)
         heartbeat_thread.start()
-        from . import alerting
+        from . import alert_delivery, alerting
         from .api.live_portfolio import LIVE_UCS
         from .scenario.live_runner import live_runner, retry_pending_acknowledgements
         try:
@@ -95,6 +95,11 @@ class LivePoller:
                     error = f"{type(exc).__name__}: {exc}"
                     db.mark_live_error(uc, error)
                     self.last_cycle_error = error
+            if not lease_lost.is_set():
+                try:  # notification only: a webhook outage must never fail the cycle
+                    alert_delivery.deliver_pending()
+                except Exception as exc:  # noqa: BLE001
+                    self.last_cycle_error = f"alert delivery: {type(exc).__name__}: {exc}"
             return not lease_lost.is_set()
         finally:
             heartbeat_stop.set()

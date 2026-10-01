@@ -130,3 +130,37 @@ def test_clear_live_state_drops_alerts(isolated_db):
     db.put_health_snapshot(UC, 2, "Red", {"Quality": "Red"})
     db.clear_live_state(UC)
     assert db.list_alerts(UC) == [] and db.get_health_snapshot(UC) is None
+
+
+def test_poll_cycle_evaluates_and_survives_webhook_outage(isolated_db, monkeypatch):
+    from app import alert_delivery, config, live_poller
+    from app.api import live_portfolio
+    from app.scenario import live_runner as live_runner_module
+
+    monkeypatch.setattr(live_portfolio, "LIVE_UCS", [UC])
+    monkeypatch.setattr(config, "LIVE_ALERT_WEBHOOK_URL", "https://hooks.example.test/x")
+
+    class RedRunner:
+        def tick(self):
+            return {"waiting": True}
+
+        def state(self):
+            return {"use_case_id": UC, "tick": 7, "observation_id": "obs-7",
+                    "signals": {}, "lanes": {"Quality": "Red"}, "overall": "Red"}
+
+    monkeypatch.setattr(live_runner_module, "live_runner", lambda uc: RedRunner())
+
+    def failing_post(url, *, json, timeout):
+        raise ConnectionError("webhook down")
+
+    monkeypatch.setattr(alert_delivery, "_default_post", failing_post)
+    worker = live_poller.LivePoller()
+    try:
+        assert worker.run_once() is True
+    finally:
+        db.release_live_lease(live_poller.LEASE_NAME, worker.owner_id)
+    rows = db.list_alerts(UC, open_only=True)
+    assert {r["lane"] for r in rows} == {"Quality", "overall"}
+    assert all(r["open_delivery_status"] == "error" for r in rows)
+    assert db.get_live_source(UC)["state"] != "error"      # delivery never holds a source
+    assert db.get_health_snapshot(UC)["tick"] == 7

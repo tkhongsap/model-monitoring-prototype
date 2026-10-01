@@ -67,6 +67,12 @@ LIVE_TELEMETRY_TOKEN = os.getenv("LIVE_TELEMETRY_TOKEN", "").strip()
 # Dedicated wake token for the scheduled Autoscale poll request. It is intentionally
 # distinct from producer telemetry auth and is never exposed to the browser bundle.
 LIVE_WORKER_TOKEN = os.getenv("LIVE_WORKER_TOKEN", "").strip()
+# Alert delivery (spec C.3).  When the webhook URL is set, every opened/resolved alert is
+# POSTed as a Slack-incoming-webhook-compatible JSON body; the URL is a secret (it is
+# the credential) and is never logged or sent to the browser.  The dashboard URL, when
+# set, is the public SPA origin linked from each notification.
+LIVE_ALERT_WEBHOOK_URL = os.getenv("LIVE_ALERT_WEBHOOK_URL", "").strip()
+LIVE_DASHBOARD_URL = os.getenv("LIVE_DASHBOARD_URL", "").strip().rstrip("/")
 # rolling per-signal history kept for the live dashboard sparklines/charts (bounded so a
 # long continuously-observing session doesn't grow the buffer / detail payloads without end)
 LIVE_HIST_MAX = int(_env("LIVE_HIST_MAX", "240"))
