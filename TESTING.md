@@ -29,7 +29,21 @@ so on macOS the Vite build fails with "Cannot find module @rollup/rollup-darwin-
 The strict-live frontend workflow (`.github/workflows/strict-live-frontend.yml`) is the
 proof for those two commands; report them as unavailable when running on macOS.
 
-CI runs the backend suite against PostgreSQL 16 in
+The slow DEMO-FULL bake tests need an OpenMP runtime: `import nannyml` loads XGBoost
+and LightGBM (through `flaml`), and their macOS wheels link `libomp.dylib` without
+shipping it. On a Mac without it the import fails, the adapter degrades every
+`estimated_roc_auc` to `None` by design, and `test_calibration.py` C3 and C8 fail with
+"NannyML CBPE degraded to None". Either `brew install libomp`, or point the loader at the
+copy scikit-learn already vendors (no install; must be set before Python starts):
+
+```bash
+DYLD_FALLBACK_LIBRARY_PATH="$PWD/.venv/lib/python3.12/site-packages/sklearn/.dylibs" .venv/bin/python -m pytest -q
+```
+
+Linux wheels bundle `libgomp`, so CI needs nothing; on Replit `backend/run.sh` probes the
+Nix store for `libgomp.so.1`. The fast suite (`-m "not slow"`) never imports NannyML.
+
+CI runs the full backend suite, slow tests included, against PostgreSQL 16 in
 `.github/workflows/backend-live.yml` and also validates the strict-live configuration
 with CI placeholder URLs and tokens. Locally the suite uses SQLite under a temporary
 directory; no test needs a real producer, Langfuse, or a live Claude judge, and those

@@ -27,6 +27,19 @@ def _healths(payloads: list[dict], uc: str, key: str) -> list[str]:
     return [p["use_cases"][uc]["signals"][key]["health"] for p in payloads]
 
 
+def _estimated_auc(payloads: list[dict]) -> list[float | None]:
+    """AICT-P02 estimated ROC-AUC per tick. The adapter degrades an engine failure to
+    None by design (gotcha #8), so a degraded bake is reported with the engine's own
+    error instead of a TypeError on None. The usual cause is a host without an OpenMP
+    runtime, which breaks `import nannyml` — see TESTING.md, Host limits."""
+    for p in payloads:
+        err = p["use_cases"]["AICT-P02"]["errors"].get("nannyml")
+        assert err is None, (
+            f"t{p['tick']} NannyML CBPE degraded to None: {' '.join(err.split())[:200]} "
+            "(TESTING.md, Host limits)")
+    return _signals(payloads, "AICT-P02", "estimated_roc_auc")
+
+
 @pytest.fixture(scope="module")
 def bake_payloads():
     baker.bake("DEMO-FULL", seed=SEED, log=lambda *a: None)
@@ -56,7 +69,7 @@ def test_c3_estimated_auc_early_warning(bake_payloads):
     shift — the label-free estimate SAGS measurably below its baseline (the early
     warning) but does not reach the original table's illustrative Amber band. The
     Sheet-3 bands are untouched; the assertion set now matches the real engine."""
-    est = _signals(bake_payloads, "AICT-P02", "estimated_roc_auc")
+    est = _estimated_auc(bake_payloads)
     assert est[9] >= 0.80, f"t9 est {est[9]} < 0.80"
     assert all(e is None or e >= 0.72 for e in est), "estimated AUC crossed Red"
     baseline = sum(est[0:5]) / 5
@@ -111,7 +124,7 @@ def test_c7_action_mechanics(bake_payloads):
 
 def test_c8_recovery(bake_payloads):
     drift = _signals(bake_payloads, "AICT-P02", "data_drift_share")
-    est = _signals(bake_payloads, "AICT-P02", "estimated_roc_auc")
+    est = _estimated_auc(bake_payloads)
     real = _signals(bake_payloads, "AICT-P02", "realized_roc_auc")
     assert drift[16] <= 0.30, f"t16 drift {drift[16]} not recovered (vs the new reference)"
     assert est[16] >= 0.805, f"t16 est {est[16]} < 0.805"

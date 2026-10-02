@@ -47,6 +47,38 @@ depend on. The spec is
 
 ## Work log
 
+### 2026-10-02 — slow calibration tests C3 and C8: missing OpenMP runtime on macOS
+
+- Changed: `backend/tests/test_calibration.py` reads the estimate through a new
+  `_estimated_auc` helper that fails with the engine error recorded in the baked payload
+  (`use_cases["AICT-P02"]["errors"]["nannyml"]`) when CBPE degraded; the C3 and C8
+  assertions and every band are unchanged. `TESTING.md` documents the OpenMP prerequisite
+  and states that CI runs the slow tests. No application code changed.
+- Evidence: root cause traced with a one-off script that printed the exception
+  `EvidentlyNannyMLAdapter._fit_cbpe` remembers: `XGBoostError: libxgboost.dylib could not
+  be loaded … Library not loaded: @rpath/libomp.dylib`, raised by `import nannyml`
+  (`nannyml` → `flaml` → `xgboost`; `import lightgbm` fails the same way). All 20 ticks
+  carried that error and a `None` estimate. With
+  `DYLD_FALLBACK_LIBRARY_PATH=.venv/lib/python3.12/site-packages/sklearn/.dylibs` and no
+  other change the estimates are 0.8515 … 0.8162 with no engine error. From `backend/` on
+  this macOS host (Python 3.12.14, nannyml 0.13.1, xgboost 2.1.4, lightgbm 4.5.0):
+  `.venv/bin/python -m pytest -q` with that variable → 168 passed; without it → 166
+  passed, 2 failed (C3, C8, now "NannyML CBPE degraded to None: XGBoostError …"). Linux CI
+  (`backend-live.yml`, `python -m pytest -q backend/tests`, no marker filter) was already
+  green on `main` with 168 passed (run 36900072022). Unavailable: real producer,
+  Langfuse, live Claude judge; `build:live` / `check:strict-live` (macOS; no frontend
+  change).
+- Learned: the earlier Known-gaps entry was wrong twice — the failure is host-specific,
+  and CI does run the slow tests. A `None` signal from a bake is a degraded engine, so
+  read the payload's `errors` before the code. An in-process preload of scikit-learn's
+  `libomp` (`ctypes.CDLL(..., RTLD_GLOBAL)`) does not satisfy dyld because the vendored
+  copy has a different install name; the path must be on the loader's search list before
+  Python starts.
+- Remaining: on a Mac without `libomp` the plain `pytest -q` still fails C3 and C8 until
+  the prerequisite in `TESTING.md` is met; a local demo bake or live run on such a host
+  shows the estimate as Unknown for the same reason (`backend/run.sh` only probes for the
+  Linux `libgomp`).
+
 ### 2026-10-02 — repository hygiene and contract strictness (slice E)
 
 - Changed: deleted the dead scaffold (`.migration-backup/`, `lib/*`,
@@ -248,11 +280,6 @@ depend on. The spec is
 
 ## Known gaps
 
-- Two pre-existing slow-test failures: `backend/tests/test_calibration.py::
-  test_c3_estimated_auc_early_warning` and `::test_c8_recovery` raise `TypeError` on a
-  `None` `estimated_roc_auc` (`.venv/bin/python -m pytest -q -m slow`). Impact: the slow
-  demo-calibration suite is red; CI does not run `-m slow`. Trigger: unscheduled; not
-  touched by slice E.
 - Alert triage ownership (contract §18 Q1) is open at the contract level; resolved for
   this repository by [docs/adr/0001-alert-ownership.md](docs/adr/0001-alert-ownership.md)
   (RAI team via the webhook channel; producers are not paged). Alerts have no

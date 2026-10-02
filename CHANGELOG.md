@@ -80,6 +80,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- The slow calibration tests C3 and C8 (`backend/tests/test_calibration.py`) no longer
+  fail with a `TypeError` on a `None` `estimated_roc_auc` on macOS. The cause was the
+  host, not the code: without an OpenMP runtime `import nannyml` fails and every CBPE
+  estimate degrades to `None`. [TESTING.md](TESTING.md) now lists the prerequisite and a
+  no-install workaround, and the two tests report the engine's own error when a bake is
+  degraded.
 - A chatbot trace without `latency_s` is no longer read as 0.0 seconds: it is excluded
   from `p95_latency_s` and counted in the observation's `latency_missing`; its stored
   and sampled latency is `null` (spec E.3). The judge docstring in
