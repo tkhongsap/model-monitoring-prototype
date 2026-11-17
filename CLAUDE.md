@@ -80,6 +80,23 @@ Run required checks (`TESTING.md`), inspect the diff, update `CHANGELOG.md` and
 `DEVLOG.md`, and report passed, failed, skipped, and unavailable evidence plus
 remaining risk. Commit messages use Conventional Commits.
 
+## Verification rules
+
+These add to "Done" above and to `TESTING.md`; tasks arrive as
+`.github/ISSUE_TEMPLATE/agent-task.md`, PRs use `.github/PULL_REQUEST_TEMPLATE.md`.
+
+- Green pytest alone is not done. Drive what changed: call the route on a local
+  `uvicorn app.main:app` and paste the response; for the dashboard attach a screenshot or
+  a driven run (`docs/LIVE-DEMO.md`); for a migration run `scripts/migrate.py` twice.
+- Report each done criterion as met, unmet or untested, with its evidence. "Untested" is
+  an acceptable answer; "should work" is not.
+- A fixed bug leaves a test in `backend/tests/` that fails on the old code.
+- Never loosen an assertion, a health band, the `slow` marker or
+  `scripts/check-strict-live-bundle.mjs` to get green. If a gate is wrong, open an issue.
+- No comment or note that justifies a shortcut. Fix the cause or flag it in the PR.
+- Never hand-edit `pnpm-lock.yaml`; change the manifest and run `pnpm install`.
+- Stop and ask rather than widen scope beyond the issue.
+
 ## Lessons (newest first)
 
 - When a producer window has `count=0`, store it as an observation and advance —

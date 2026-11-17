@@ -35,6 +35,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- Agent-task issue template (`.github/ISSUE_TEMPLATE/agent-task.md`), pull-request
+  template (`.github/PULL_REQUEST_TEMPLATE.md`) and a "Verification rules" section in
+  `CLAUDE.md`: each done criterion is reported met, unmet or untested with evidence.
 - Operational resilience (spec D). Producer pulls, acknowledgements, score write-back
   and the alert webhook retry on 429/502/503/504 and connection errors: three attempts,
   exponential backoff 0.5 s → 4 s with jitter, `Retry-After` honoured; other 4xx are

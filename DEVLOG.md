@@ -47,6 +47,29 @@ depend on. The spec is
 
 ## Work log
 
+### 2026-11-17 — agent verification practices: issue template, PR template, rules
+
+- Changed: added `.github/ISSUE_TEMPLATE/agent-task.md` and
+  `.github/PULL_REQUEST_TEMPLATE.md` (neither existed), and a "Verification rules" section
+  in `CLAUDE.md` holding only the rules it did not already state (drive the real thing,
+  per-criterion met / unmet / untested, a fixed bug leaves a test, never loosen a gate,
+  no justifying comments, no hand-edited lockfile, stop rather than widen scope). "One PR
+  per slice", "never claim an unavailable check passed" and "never hide a failing check"
+  were already there and are not repeated. No code, CI or other document changed.
+- Evidence: from `backend/` on macOS,
+  `python -m pytest -q -p no:cacheprovider tests/test_docs.py` → 5 passed (one H1, final
+  newline, `CLAUDE.md` at 108 of 120 lines, links resolve, no machine-local path) and
+  `python -m pytest -q -p no:cacheprovider -m "not slow"` → 159 passed, 9 deselected, both with the
+  interpreter of an existing Python 3.12 venv built from `requirements.txt`. Not run:
+  `pnpm run typecheck` (no frontend change, no `node_modules` in this worktree), the slow
+  suite, `build:live` / `check:strict-live` (macOS). Unavailable: real producer, Langfuse,
+  live Claude judge.
+- Learned: `test_docs.py` walks `.github/` too, so the templates must end with a newline,
+  carry no machine-local path and use only links that resolve.
+- Remaining: GitHub's rendering of the issue-template front matter and of the PR template
+  is unverified until the branch is pushed. The templates are unused so far; the first
+  agent task will show whether the fields fit.
+
 ### 2026-10-02 — slow calibration tests C3 and C8: missing OpenMP runtime on macOS
 
 - Changed: `backend/tests/test_calibration.py` reads the estimate through a new
