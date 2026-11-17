@@ -86,8 +86,9 @@ These add to "Done" above and to `TESTING.md`; tasks arrive as
 `.github/ISSUE_TEMPLATE/agent-task.md`, PRs use `.github/PULL_REQUEST_TEMPLATE.md`.
 
 - Green pytest alone is not done. Drive what changed: call the route on a local
-  `uvicorn app.main:app` and paste the response; for the dashboard attach a screenshot or
-  a driven run (`docs/LIVE-DEMO.md`); for a migration run `scripts/migrate.py` twice.
+  `uvicorn app.main:app` and paste the response; for the dashboard attach a screenshot of
+  a local run (`docs/LIVE-DEMO.md`); for a migration run `scripts/migrate.py` twice.
+  What this host cannot drive (see `TESTING.md` host limits) is untested, not met.
 - Report each done criterion as met, unmet or untested, with its evidence. "Untested" is
   an acceptable answer; "should work" is not.
 - A fixed bug leaves a test in `backend/tests/` that fails on the old code.

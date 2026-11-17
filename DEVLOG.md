@@ -58,7 +58,7 @@ depend on. The spec is
   were already there and are not repeated. No code, CI or other document changed.
 - Evidence: from `backend/` on macOS,
   `python -m pytest -q -p no:cacheprovider tests/test_docs.py` → 5 passed (one H1, final
-  newline, `CLAUDE.md` at 108 of 120 lines, links resolve, no machine-local path) and
+  newline, `CLAUDE.md` then at 108 of 120 lines, links resolve, no machine-local path) and
   `python -m pytest -q -p no:cacheprovider -m "not slow"` → 159 passed, 9 deselected, both with the
   interpreter of an existing Python 3.12 venv built from `requirements.txt`. Not run:
   `pnpm run typecheck` (no frontend change, no `node_modules` in this worktree), the slow
@@ -69,6 +69,10 @@ depend on. The spec is
 - Remaining: GitHub's rendering of the issue-template front matter and of the PR template
   is unverified until the branch is pushed. The templates are unused so far; the first
   agent task will show whether the fields fit.
+- Review pass: the dashboard-evidence rule now says what the host cannot drive is
+  untested (the Vite build and a real producer are unavailable on macOS), and the
+  templates call their low / normal / high scale the "review tier" so it is not read as
+  the repo risk tier R1. `CLAUDE.md` is at 109 of 120 lines; `test_docs.py` → 5 passed.
 
 ### 2026-10-02 — slow calibration tests C3 and C8: missing OpenMP runtime on macOS
 

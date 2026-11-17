@@ -25,7 +25,7 @@ labels: []
 
 ## Verification (evidence to attach to the PR)
 - Required checks from TESTING.md, with output: `.venv/bin/python -m pytest -q -m "not slow"` from `backend/`; `pnpm run typecheck` from the root; the row of the "Change-specific proof" table that applies.
-- The real thing, driven: <route response from a local `uvicorn app.main:app` / screenshot of the dashboard page / `scripts/migrate.py` run twice>
+- The real thing, driven: <route response from a local `uvicorn app.main:app` / screenshot of the dashboard page / `scripts/migrate.py` run twice>. What the host cannot drive is untested, not met.
 - Report each done criterion as met, unmet or untested. Report `build:live` and `check:strict-live` (Linux only), a real producer, Langfuse and a live Claude judge as unavailable, never as passed.
 
 ## Tests
@@ -35,7 +35,7 @@ labels: []
 
 ## Risk and review tier
 - Undone by a git revert alone? yes / no (no for: a migration in `backend/app/db.py`, cursor or observation writes, a deploy)
-- Tier: low (docs only: agent review) / normal (agent review plus one human) / high (schema, cursors or stored observations, secrets, authorization, `scripts/deploy-*.sh`, CI workflows: human review of every line)
+- Review tier (separate from the repo risk tier R1 in CLAUDE.md): low (docs only: agent review) / normal (agent review plus one human) / high (schema, cursors or stored observations, secrets, authorization, `scripts/deploy-*.sh`, CI workflows: human review of every line)
 - Merging is always the owner's call (CLAUDE.md "Ask first").
 
 ## Guardrails

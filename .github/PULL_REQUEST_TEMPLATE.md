@@ -16,7 +16,7 @@
 <!-- Everything untested or unavailable, and why. On macOS: `build:live` and `check:strict-live`. Always: a real producer, Langfuse, a live Claude judge. -->
 
 ## Risk and rollback
-- Tier: low / normal / high
+- Review tier (from the issue; not the repo risk tier R1): low / normal / high
 - What could break, and whether a git revert alone undoes it (a migration, a cursor advance or a stored observation is not undone by a revert).
 
 ## Process fix proposed
